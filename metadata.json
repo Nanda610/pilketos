@@ -1,0 +1,6 @@
+{
+  "name": "E-Pilketos & E-Pilkosim Digital",
+  "description": "Sistem Informasi Pemilihan Suara Elektronik (E-Voting) Ketua & Wakil Ketua OSIS/OSIM Sekolah dengan Integritas Data Tinggi, Luber-Jurdil, Quick Count Real-time, dan Manajemen Multi-Periode Dinamis.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
