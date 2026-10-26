@@ -15,13 +15,16 @@ import {
   BarChart3, PieChart, Sparkles, Volume2, VolumeX, RotateCcw,
   Trophy, PartyPopper, Flame
 } from 'lucide-react';
-import { SchoolConfig, ElectionSummary, Candidate } from '../types';
+import { SchoolConfig, ElectionSummary, Candidate, RealtimeSyncMetadata } from '../types';
 import { CandidateAvatar, SchoolCrestLogo } from './CandidateAvatar';
 import { CandidateVideoDisplay } from './CandidateVideoDisplay';
+import { formatAppTimeDisplay, evaluateVotingSchedule } from '../lib/realtimeSync';
 
 interface QuickCountDashboardProps {
   school: SchoolConfig;
   summary: ElectionSummary;
+  appTimeMs: number;
+  syncMeta: RealtimeSyncMetadata;
   onNavigateToBooth: () => void;
 }
 
@@ -71,6 +74,8 @@ const AnimatedNumber: React.FC<{ value: number; duration?: number; suffix?: stri
 export const QuickCountDashboard: React.FC<QuickCountDashboardProps> = ({
   school,
   summary,
+  appTimeMs,
+  syncMeta,
   onNavigateToBooth,
 }) => {
   const [selectedCandidate, setSelectedCandidate] = useState<Candidate | null>(null);
@@ -83,6 +88,17 @@ export const QuickCountDashboard: React.FC<QuickCountDashboardProps> = ({
   const [showCelebrationModal, setShowCelebrationModal] = useState(false);
 
   const { period, totalVoters, totalVoted, totalUnvoted, participationPercentage, candidatesResults, classParticipation } = summary;
+  const formattedClock = formatAppTimeDisplay(appTimeMs);
+  const scheduleStatus = evaluateVotingSchedule(period, appTimeMs);
+
+  // Keep selectedCandidate synced if Admin/Panitia edits candidate while modal is open
+  useEffect(() => {
+    if (!selectedCandidate) return;
+    const updated = candidatesResults.find((r) => r.candidate.id === selectedCandidate.id)?.candidate;
+    if (updated) {
+      setSelectedCandidate(updated);
+    }
+  }, [candidatesResults, selectedCandidate]);
 
   // Find current leading candidate
   const leadingCandidate = [...candidatesResults].sort((a, b) => b.voteCount - a.voteCount)[0];
@@ -146,25 +162,34 @@ export const QuickCountDashboard: React.FC<QuickCountDashboardProps> = ({
           <div className="flex items-start gap-4">
             <SchoolCrestLogo size={64} type={school.type} logoUrl={school.logoUrl} className="mt-1 shadow-lg ring-2 ring-white/20" />
             <div>
-              <div className="flex items-center gap-2 text-xs font-semibold tracking-wider text-sky-300 uppercase">
-                <span>{school.type} {school.name}</span>
+              <div className="flex flex-wrap items-center gap-2 text-xs font-semibold tracking-wider text-sky-300 uppercase">
+                <span data-testid="hero-school-name">{school.type} {school.name}</span>
                 <span>·</span>
                 <span>NPSN: {school.npsn}</span>
+                <span>·</span>
+                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-sky-500/20 border border-sky-400/30 text-[10px] text-sky-200 normal-case">
+                  Sinkronisasi Online ({syncMeta.onlineClients} Klien · Rev #{syncMeta.revision})
+                </span>
               </div>
-              <h1 className="text-2xl md:text-3xl font-extrabold tracking-tight text-white mt-1">
+              <h1 className="text-2xl md:text-3xl font-extrabold tracking-tight text-white mt-1" data-testid="hero-period-name">
                 {period.periodName}
               </h1>
               <p className="text-xs md:text-sm text-slate-300 mt-1 max-w-2xl leading-relaxed">
-                Penghitungan suara langsung (Quick Count) berbasis sistem e-voting terintegrasi, transparan, dan terverifikasi secara real-time.
+                Penghitungan suara langsung (Quick Count) berbasis sistem e-voting terintegrasi, transparan, dan tersinkronisasi penuh dengan seluruh perangkat pada waktu aplikasi yang sama.
               </p>
               <div className="flex flex-wrap items-center gap-3 mt-3 text-xs text-slate-300/80">
-                <span>Waktu Pemilihan: {period.votingOpenTime} - {period.votingCloseTime} WIB</span>
+                <span className="inline-flex items-center gap-1.5 font-mono font-bold text-sky-200 bg-white/10 px-2.5 py-0.5 rounded-lg border border-white/15" data-testid="hero-app-time">
+                  <Clock className="w-3.5 h-3.5 text-sky-400" />
+                  Waktu Aplikasi: {formattedClock.timeString} WIB ({formattedClock.dateString})
+                </span>
                 <span>·</span>
-                <span>Tahun Ajaran: {period.academicYear}</span>
+                <span>Jadwal Pemilihan: {period.votingOpenTime} - {period.votingCloseTime} WIB</span>
+                <span>·</span>
+                <span>TA {period.academicYear}</span>
                 <span>·</span>
                 <span className="inline-flex items-center gap-1.5 text-emerald-400 font-semibold bg-emerald-500/10 px-2.5 py-0.5 rounded-full border border-emerald-400/20">
                   <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
-                  Pemungutan Suara Sedang Berlangsung
+                  {scheduleStatus.label}
                 </span>
               </div>
             </div>

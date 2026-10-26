@@ -7,7 +7,7 @@
 
 import React, { useState, useEffect } from 'react';
 import { electionStore } from './lib/store';
-import { SchoolConfig, ElectionPeriod, CommitteeMember, AuditLog, ElectionSummary } from './types';
+import { SchoolConfig, ElectionPeriod, CommitteeMember, AuditLog, ElectionSummary, RealtimeSyncMetadata } from './types';
 import { Navbar, AppView } from './components/Navbar';
 import { QuickCountDashboard } from './components/QuickCountDashboard';
 import { BilikSuara } from './components/BilikSuara';
@@ -17,20 +17,46 @@ import { PRDDocument } from './components/PRDDocument';
 import { OpeningSequence } from './components/OpeningSequence';
 
 export default function App() {
-  const [currentView, setCurrentView] = useState<AppView>('PUBLIC');
-  // Opening video plays before entering the application
-  const [showOpeningVideo, setShowOpeningVideo] = useState<boolean>(true);
+  const [currentView, setCurrentView] = useState<AppView>(() => {
+    if (typeof window !== 'undefined') {
+      const params = new URLSearchParams(window.location.search);
+      const requestedView = params.get('view')?.toUpperCase();
+      if (
+        requestedView === 'PUBLIC' ||
+        requestedView === 'BOOTH' ||
+        requestedView === 'PANITIA' ||
+        requestedView === 'ADMIN' ||
+        requestedView === 'PRD'
+      ) {
+        return requestedView as AppView;
+      }
+    }
+    return 'PUBLIC';
+  });
 
-  // Reactive state synced with electionStore
+  // Opening video plays before entering the application (skippable via ?autostart=1)
+  const [showOpeningVideo, setShowOpeningVideo] = useState<boolean>(() => {
+    if (typeof window !== 'undefined') {
+      const params = new URLSearchParams(window.location.search);
+      if (params.get('autostart') === '1' || params.get('skipIntro') === '1') {
+        return false;
+      }
+    }
+    return true;
+  });
+
+  // Reactive state synced with electionStore (and authoritative real-time server)
   const [school, setSchool] = useState<SchoolConfig>(() => electionStore.getSchool());
   const [periods, setPeriods] = useState<ElectionPeriod[]>(() => electionStore.getPeriods());
   const [activePeriod, setActivePeriod] = useState<ElectionPeriod>(() => electionStore.getActivePeriod());
   const [committee, setCommittee] = useState<CommitteeMember[]>(() => electionStore.getCommittee());
   const [auditLogs, setAuditLogs] = useState<AuditLog[]>(() => electionStore.getAuditLogs());
   const [summary, setSummary] = useState<ElectionSummary>(() => electionStore.getSummary());
+  const [syncMeta, setSyncMeta] = useState<RealtimeSyncMetadata>(() => electionStore.getSyncMetadata());
+  const [appTimeMs, setAppTimeMs] = useState<number>(() => electionStore.getAppTimeMs());
 
   useEffect(() => {
-    // Subscribe to store updates
+    // Subscribe to real-time store updates (local & remote WebSocket/BroadcastChannel/HTTP)
     const unsubscribe = electionStore.subscribe(() => {
       setSchool(electionStore.getSchool());
       setPeriods(electionStore.getPeriods());
@@ -39,9 +65,19 @@ export default function App() {
       setCommittee(electionStore.getCommittee(currentActive.id));
       setAuditLogs(electionStore.getAuditLogs());
       setSummary(electionStore.getSummary(currentActive.id));
+      setSyncMeta(electionStore.getSyncMetadata());
+      setAppTimeMs(electionStore.getAppTimeMs());
     });
 
-    return () => unsubscribe();
+    // Unified 1-second application clock ticker synchronized across all clients
+    const clockTimer = setInterval(() => {
+      setAppTimeMs(electionStore.getAppTimeMs());
+    }, 1000);
+
+    return () => {
+      unsubscribe();
+      clearInterval(clockTimer);
+    };
   }, []);
 
   return (
@@ -77,6 +113,8 @@ export default function App() {
         school={school}
         currentView={currentView}
         onSelectView={setCurrentView}
+        appTimeMs={appTimeMs}
+        syncMeta={syncMeta}
       />
 
       {/* Main Content Area */}
@@ -85,6 +123,8 @@ export default function App() {
           <QuickCountDashboard
             school={school}
             summary={summary}
+            appTimeMs={appTimeMs}
+            syncMeta={syncMeta}
             onNavigateToBooth={() => setCurrentView('BOOTH')}
           />
         )}
@@ -92,6 +132,8 @@ export default function App() {
         {currentView === 'BOOTH' && (
           <BilikSuara
             school={school}
+            appTimeMs={appTimeMs}
+            syncMeta={syncMeta}
             onExitBooth={() => setCurrentView('PUBLIC')}
           />
         )}
@@ -110,6 +152,8 @@ export default function App() {
             committee={committee}
             auditLogs={auditLogs}
             summary={summary}
+            appTimeMs={appTimeMs}
+            syncMeta={syncMeta}
           />
         )}
 

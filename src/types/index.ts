@@ -147,3 +147,31 @@ export interface ElectionSummary {
     percentage: number;
   }[];
 }
+
+export interface ElectionStateSnapshot {
+  revision: number;
+  updatedAt: string;
+  updatedBy: string;
+  lastAction: string;
+  appTimeOffsetMs: number;
+  school: SchoolConfig;
+  periods: ElectionPeriod[];
+  candidates: Candidate[];
+  voters: Voter[];
+  votes: AnonymousVote[];
+  committee: CommitteeMember[];
+  auditLogs: AuditLog[];
+}
+
+export interface RealtimeSyncMetadata {
+  isConnected: boolean;
+  transport: 'websocket' | 'http-poll' | 'broadcast' | 'connecting';
+  onlineClients: number;
+  revision: number;
+  lastSyncedAt: string | null;
+  updatedBy: string;
+  lastAction: string;
+  serverClockOffsetMs: number;
+  appTimeOffsetMs: number;
+}
+

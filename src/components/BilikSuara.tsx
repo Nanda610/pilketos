@@ -13,15 +13,18 @@ import { motion, AnimatePresence } from 'motion/react';
 import { safeConfetti as confetti } from '../utils/confettiHelper';
 import { 
   Vote, KeyRound, ShieldCheck, CheckCircle2, AlertCircle, 
-  ArrowRight, Check, X, Sparkles, RefreshCw, LogOut, Info
+  ArrowRight, Check, X, Sparkles, RefreshCw, LogOut, Info, Clock
 } from 'lucide-react';
-import { SchoolConfig, Candidate, Voter, ElectionPeriod } from '../types';
+import { SchoolConfig, Candidate, Voter, ElectionPeriod, RealtimeSyncMetadata } from '../types';
 import { electionStore } from '../lib/store';
 import { CandidateAvatar, SchoolCrestLogo } from './CandidateAvatar';
 import { CandidateVideoDisplay } from './CandidateVideoDisplay';
+import { formatAppTimeDisplay } from '../lib/realtimeSync';
 
 interface BilikSuaraProps {
   school: SchoolConfig;
+  appTimeMs: number;
+  syncMeta: RealtimeSyncMetadata;
   onExitBooth: () => void;
 }
 
@@ -37,23 +40,41 @@ interface ConfettiParticle {
   shape: 'circle' | 'square' | 'star';
 }
 
-export const BilikSuara: React.FC<BilikSuaraProps> = ({ school, onExitBooth }) => {
+export const BilikSuara: React.FC<BilikSuaraProps> = ({ school, appTimeMs, syncMeta, onExitBooth }) => {
   const [step, setStep] = useState<BoothStep>('AUTH');
   const [nisn, setNisn] = useState('');
   const [pin, setPin] = useState('');
   const [errorMessage, setErrorMessage] = useState('');
   const [authenticatedVoter, setAuthenticatedVoter] = useState<Voter | null>(null);
-  const [activePeriod, setActivePeriod] = useState<ElectionPeriod | null>(null);
-  const [candidates, setCandidates] = useState<Candidate[]>([]);
+  const [activePeriod, setActivePeriod] = useState<ElectionPeriod>(() => electionStore.getActivePeriod());
+  const [candidates, setCandidates] = useState<Candidate[]>(() =>
+    electionStore.getCandidates(electionStore.getActivePeriod().id)
+  );
   const [selectedCandidate, setSelectedCandidate] = useState<Candidate | null>(null);
   const [previewCandidate, setPreviewCandidate] = useState<Candidate | null>(null);
   const [receiptCode, setReceiptCode] = useState('');
   const [countdown, setCountdown] = useState(5);
 
+  const formattedClock = formatAppTimeDisplay(appTimeMs);
+
+  // Subscribe to real-time updates from Admin/Panitia so candidates & activePeriod stay live in Bilik Suara
   useEffect(() => {
-    const period = electionStore.getActivePeriod();
-    setActivePeriod(period);
-    setCandidates(electionStore.getCandidates(period.id));
+    const syncBoothData = () => {
+      const period = electionStore.getActivePeriod();
+      const latestCandidates = electionStore.getCandidates(period.id);
+      setActivePeriod(period);
+      setCandidates(latestCandidates);
+      setSelectedCandidate((prev) =>
+        prev ? latestCandidates.find((c) => c.id === prev.id) || prev : null
+      );
+      setPreviewCandidate((prev) =>
+        prev ? latestCandidates.find((c) => c.id === prev.id) || null : null
+      );
+    };
+
+    syncBoothData();
+    const unsubscribe = electionStore.subscribe(syncBoothData);
+    return () => unsubscribe();
   }, []);
 
   // 5-second countdown timer on SUCCESS screen
@@ -150,7 +171,7 @@ export const BilikSuara: React.FC<BilikSuaraProps> = ({ school, onExitBooth }) =
   return (
     <div className="max-w-4xl mx-auto space-y-6 pb-16 relative">
       {/* Booth Top Header in Frosted Glass */}
-      <div className="flex items-center justify-between glass-panel border border-white/80 rounded-2xl px-6 py-3.5 shadow-md">
+      <div className="flex flex-wrap items-center justify-between gap-3 glass-panel border border-white/80 rounded-2xl px-6 py-3.5 shadow-md">
         <div className="flex items-center gap-3">
           <SchoolCrestLogo size={36} type={school.type} logoUrl={school.logoUrl} className="shadow-xs" />
           <div>
@@ -158,18 +179,24 @@ export const BilikSuara: React.FC<BilikSuaraProps> = ({ school, onExitBooth }) =
               Bilik Suara Digital (E-Voting Kiosk)
             </h2>
             <p className="text-xs text-slate-500 font-medium">
-              {school.name} · {activePeriod?.periodName}
+              {school.name} · {activePeriod?.periodName} · Rev #{syncMeta.revision}
             </p>
           </div>
         </div>
 
-        <button
-          onClick={onExitBooth}
-          className="text-xs font-bold text-slate-700 glass-button hover:text-slate-900 px-3.5 py-1.5 rounded-xl transition-all flex items-center gap-1.5 cursor-pointer"
-        >
-          <LogOut className="w-3.5 h-3.5 text-rose-500" />
-          <span>Kembali ke Beranda</span>
-        </button>
+        <div className="flex items-center gap-2.5">
+          <div className="hidden sm:flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-slate-900/90 text-white text-xs font-mono font-bold shadow-xs">
+            <Clock className="w-3.5 h-3.5 text-sky-400" />
+            <span>{formattedClock.timeString} WIB</span>
+          </div>
+          <button
+            onClick={onExitBooth}
+            className="text-xs font-bold text-slate-700 glass-button hover:text-slate-900 px-3.5 py-1.5 rounded-xl transition-all flex items-center gap-1.5 cursor-pointer"
+          >
+            <LogOut className="w-3.5 h-3.5 text-rose-500" />
+            <span>Kembali ke Beranda</span>
+          </button>
+        </div>
       </div>
 
       {/* STEP 1: AUTHENTICATION */}

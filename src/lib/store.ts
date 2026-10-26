@@ -16,6 +16,8 @@ import {
   CommitteeMember,
   AuditLog,
   ElectionSummary,
+  ElectionStateSnapshot,
+  RealtimeSyncMetadata,
 } from '../types';
 import {
   INITIAL_SCHOOL,
@@ -27,8 +29,15 @@ import {
   INITIAL_AUDIT_LOGS,
 } from './initialData';
 import { generateRandomPin, hashPin, verifyPin, validateNisn, validatePin } from './security';
+import {
+  calculateServerClockOffset,
+  computeAppTimeMs,
+  computeOffsetForTargetAppTime,
+  shouldApplyRemoteSnapshot,
+} from './realtimeSync';
 
 const STORAGE_KEY_PREFIX = 'epilketos_state_smp_v2';
+const BROADCAST_CHANNEL_NAME = 'epilketos_realtime_sync_v2';
 
 export class ElectionStore {
   private school: SchoolConfig;
@@ -40,6 +49,25 @@ export class ElectionStore {
   private auditLogs: AuditLog[];
   private listeners: Set<() => void> = new Set();
 
+  // Real-time synchronization & Unified Application Clock state
+  private clientId: string = `client_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
+  private revision: number = 1;
+  private updatedAt: string = new Date().toISOString();
+  private updatedBy: string = 'Sistem';
+  private lastAction: string = 'INIT';
+  private serverClockOffsetMs: number = 0;
+  private appTimeOffsetMs: number = 0;
+  private isConnected: boolean = false;
+  private transport: RealtimeSyncMetadata['transport'] = 'connecting';
+  private onlineClients: number = 1;
+  private lastSyncedAt: string | null = null;
+  private isApplyingRemoteState: boolean = false;
+
+  private ws: WebSocket | null = null;
+  private broadcastChannel: BroadcastChannel | null = null;
+  private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private pollTimer: ReturnType<typeof setInterval> | null = null;
+
   constructor() {
     this.school = INITIAL_SCHOOL;
     this.periods = INITIAL_PERIODS;
@@ -50,6 +78,7 @@ export class ElectionStore {
     this.auditLogs = INITIAL_AUDIT_LOGS;
 
     this.loadFromStorage();
+    this.initRealtimeSync();
   }
 
   // Subscribe to changes (Real-time reactive listener)
@@ -58,9 +87,422 @@ export class ElectionStore {
     return () => this.listeners.delete(listener);
   }
 
-  private notify() {
-    this.saveToStorage();
+  private emitToListeners() {
     this.listeners.forEach((fn) => fn());
+  }
+
+  private notify(updatedBy: string = 'Admin Sekolah', lastAction: string = 'UPDATE_DATA') {
+    if (!this.isApplyingRemoteState) {
+      this.revision += 1;
+      this.updatedAt = new Date(this.getAppTimeMs()).toISOString();
+      this.updatedBy = updatedBy;
+      this.lastAction = lastAction;
+      this.saveToStorage();
+      this.pushStateToRemote(updatedBy, lastAction);
+    } else {
+      this.saveToStorage();
+    }
+    this.emitToListeners();
+  }
+
+  public getAppTimeMs(clientNowMs: number = Date.now()): number {
+    return computeAppTimeMs(clientNowMs, this.serverClockOffsetMs, this.appTimeOffsetMs);
+  }
+
+  public getSyncMetadata(): RealtimeSyncMetadata {
+    return {
+      isConnected: this.isConnected,
+      transport: this.transport,
+      onlineClients: this.onlineClients,
+      revision: this.revision,
+      lastSyncedAt: this.lastSyncedAt,
+      updatedBy: this.updatedBy,
+      lastAction: this.lastAction,
+      serverClockOffsetMs: this.serverClockOffsetMs,
+      appTimeOffsetMs: this.appTimeOffsetMs,
+    };
+  }
+
+  public getSnapshot(): ElectionStateSnapshot {
+    return {
+      revision: this.revision,
+      updatedAt: this.updatedAt,
+      updatedBy: this.updatedBy,
+      lastAction: this.lastAction,
+      appTimeOffsetMs: this.appTimeOffsetMs,
+      school: this.school,
+      periods: this.periods,
+      candidates: this.candidates,
+      voters: this.voters,
+      votes: this.votes,
+      committee: this.committee,
+      auditLogs: this.auditLogs,
+    };
+  }
+
+  public applyRemoteSnapshot(
+    snapshot: ElectionStateSnapshot,
+    serverTimeMs?: number,
+    onlineClients?: number,
+    forceSync: boolean = false,
+    clientSentAtMs?: number
+  ) {
+    if (typeof serverTimeMs === 'number' && Number.isFinite(serverTimeMs)) {
+      this.serverClockOffsetMs = calculateServerClockOffset(serverTimeMs, Date.now(), clientSentAtMs);
+    }
+    if (typeof onlineClients === 'number' && onlineClients >= 1) {
+      this.onlineClients = onlineClients;
+    }
+
+    const shouldApply = shouldApplyRemoteSnapshot(
+      { revision: this.revision, updatedAt: this.updatedAt },
+      { revision: snapshot.revision ?? 0, updatedAt: snapshot.updatedAt || '' },
+      forceSync
+    );
+
+    if (!shouldApply) {
+      // Still update appTimeOffsetMs if provided and emit metadata update
+      if (typeof snapshot.appTimeOffsetMs === 'number' && snapshot.appTimeOffsetMs !== this.appTimeOffsetMs) {
+        this.appTimeOffsetMs = snapshot.appTimeOffsetMs;
+        this.emitToListeners();
+      }
+      return;
+    }
+
+    this.isApplyingRemoteState = true;
+    try {
+      this.revision = snapshot.revision ?? this.revision;
+      this.updatedAt = snapshot.updatedAt || new Date(this.getAppTimeMs()).toISOString();
+      this.updatedBy = snapshot.updatedBy || 'Admin Sekolah';
+      this.lastAction = snapshot.lastAction || 'REALTIME_SYNC';
+      if (typeof snapshot.appTimeOffsetMs === 'number') {
+        this.appTimeOffsetMs = snapshot.appTimeOffsetMs;
+      }
+      if (snapshot.school) this.school = snapshot.school;
+      if (Array.isArray(snapshot.periods)) this.periods = snapshot.periods;
+      if (Array.isArray(snapshot.candidates)) this.candidates = snapshot.candidates;
+      if (Array.isArray(snapshot.voters)) this.voters = snapshot.voters;
+      if (Array.isArray(snapshot.votes)) this.votes = snapshot.votes;
+      if (Array.isArray(snapshot.committee)) this.committee = snapshot.committee;
+      if (Array.isArray(snapshot.auditLogs)) this.auditLogs = snapshot.auditLogs;
+
+      this.lastSyncedAt = new Date(this.getAppTimeMs()).toISOString();
+      this.saveToStorage();
+    } finally {
+      this.isApplyingRemoteState = false;
+    }
+
+    this.emitToListeners();
+  }
+
+  /**
+   * Allows the Admin to synchronize or set a specific Application Time across all connected clients.
+   */
+  public setApplicationTime(targetAppTimeMs: number) {
+    const authoritativeServerNowMs = Date.now() + this.serverClockOffsetMs;
+    const newOffset = computeOffsetForTargetAppTime(targetAppTimeMs, authoritativeServerNowMs);
+    this.appTimeOffsetMs = newOffset;
+    const formattedTarget = new Date(targetAppTimeMs).toLocaleString('id-ID');
+    this.logAudit(
+      'Admin Sekolah',
+      'SINKRONISASI_WAKTU_APLIKASI',
+      `Waktu terpadu aplikasi diselaraskan untuk seluruh klien ke: ${formattedTarget} WIB.`,
+      '192.168.10.1',
+      'INFO'
+    );
+    this.notify('Admin Sekolah', 'SINKRONISASI_WAKTU_APLIKASI');
+
+    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+      this.ws.send(
+        JSON.stringify({
+          type: 'SET_APP_TIME',
+          appTimeOffsetMs: newOffset,
+          updatedBy: 'Admin Sekolah',
+          senderId: this.clientId,
+        })
+      );
+    } else if (typeof window !== 'undefined') {
+      fetch('/api/time', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          appTimeOffsetMs: newOffset,
+          updatedBy: 'Admin Sekolah',
+          senderId: this.clientId,
+        }),
+      }).catch(() => {});
+    }
+  }
+
+  /**
+   * Resets Application Time back to real-time server clock (offset = 0) across all clients.
+   */
+  public resetApplicationTimeToRealtime() {
+    this.appTimeOffsetMs = 0;
+    this.logAudit(
+      'Admin Sekolah',
+      'RESET_WAKTU_REALTIME',
+      'Waktu aplikasi dikembalikan ke jam server real-time (WIB) untuk seluruh perangkat klien.',
+      '192.168.10.1',
+      'INFO'
+    );
+    this.notify('Admin Sekolah', 'RESET_WAKTU_REALTIME');
+
+    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+      this.ws.send(
+        JSON.stringify({
+          type: 'SET_APP_TIME',
+          resetToRealTime: true,
+          updatedBy: 'Admin Sekolah',
+          senderId: this.clientId,
+        })
+      );
+    } else if (typeof window !== 'undefined') {
+      fetch('/api/time', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          resetToRealTime: true,
+          updatedBy: 'Admin Sekolah',
+          senderId: this.clientId,
+        }),
+      }).catch(() => {});
+    }
+  }
+
+  public async forceResyncWithServer(): Promise<void> {
+    if (typeof window === 'undefined') return;
+    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+      this.ws.send(JSON.stringify({ type: 'REQUEST_STATE', clientSentAtMs: Date.now() }));
+      return;
+    }
+    await this.fetchStateFromHttp(true);
+  }
+
+  private initRealtimeSync() {
+    if (typeof window === 'undefined') return;
+
+    // 1. Cross-Tab BroadcastChannel for immediate zero-latency multi-tab sync
+    if (typeof BroadcastChannel !== 'undefined') {
+      try {
+        this.broadcastChannel = new BroadcastChannel(BROADCAST_CHANNEL_NAME);
+        this.broadcastChannel.onmessage = (event) => {
+          const data = event.data;
+          if (!data || data.senderId === this.clientId) return;
+          if (data.type === 'STATE_UPDATED' && data.state) {
+            this.applyRemoteSnapshot(data.state, data.serverTimeMs, data.onlineClients, true);
+          }
+        };
+      } catch {
+        // Ignore if BroadcastChannel is blocked
+      }
+    }
+
+    // 2. Storage event listener for same-browser tab fallback
+    window.addEventListener('storage', (event) => {
+      if (event.key === `${STORAGE_KEY_PREFIX}_snapshot` && event.newValue) {
+        try {
+          const parsed = JSON.parse(event.newValue) as ElectionStateSnapshot;
+          this.applyRemoteSnapshot(parsed, undefined, undefined, true);
+        } catch {
+          // Ignore
+        }
+      }
+    });
+
+    // 3. Connect to Authoritative Server via WebSocket (/ws) + HTTP initial fetch
+    this.fetchStateFromHttp(true);
+    this.connectWebSocket();
+
+    // 4. Periodic HTTP fallback poll & NTP clock sync check
+    this.pollTimer = setInterval(() => {
+      if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+        this.ws.send(JSON.stringify({ type: 'PING', clientSentAtMs: Date.now() }));
+      } else {
+        this.fetchStateFromHttp(false);
+      }
+    }, 3000);
+  }
+
+  private connectWebSocket() {
+    if (typeof window === 'undefined' || typeof WebSocket === 'undefined') return;
+    try {
+      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+      const wsUrl = `${protocol}//${window.location.host}/ws`;
+      const socket = new WebSocket(wsUrl);
+      this.ws = socket;
+
+      socket.onopen = () => {
+        this.isConnected = true;
+        this.transport = 'websocket';
+        socket.send(JSON.stringify({ type: 'PING', clientSentAtMs: Date.now() }));
+        this.emitToListeners();
+      };
+
+      socket.onmessage = (event) => {
+        try {
+          const msg = JSON.parse(event.data);
+          if (msg.type === 'INIT_STATE' && msg.state) {
+            this.isConnected = true;
+            this.transport = 'websocket';
+            this.applyRemoteSnapshot(msg.state, msg.serverTimeMs, msg.onlineClients, true);
+            return;
+          }
+
+          if (msg.type === 'STATE_UPDATED' && msg.state) {
+            this.isConnected = true;
+            this.transport = 'websocket';
+            if (msg.senderId === this.clientId) {
+              // Update revision & server clock from authoritative ACK
+              if (typeof msg.serverTimeMs === 'number') {
+                this.serverClockOffsetMs = calculateServerClockOffset(msg.serverTimeMs, Date.now());
+              }
+              if (typeof msg.onlineClients === 'number') {
+                this.onlineClients = msg.onlineClients;
+              }
+              if (msg.state.revision > this.revision) {
+                this.revision = msg.state.revision;
+              }
+              this.lastSyncedAt = new Date(this.getAppTimeMs()).toISOString();
+              this.emitToListeners();
+              return;
+            }
+            this.applyRemoteSnapshot(msg.state, msg.serverTimeMs, msg.onlineClients, true);
+            return;
+          }
+
+          if (msg.type === 'PONG' || msg.type === 'TIME_HEARTBEAT' || msg.type === 'PRESENCE_UPDATE') {
+            this.isConnected = true;
+            this.transport = 'websocket';
+            if (typeof msg.serverTimeMs === 'number') {
+              this.serverClockOffsetMs = calculateServerClockOffset(
+                msg.serverTimeMs,
+                Date.now(),
+                msg.clientSentAtMs
+              );
+            }
+            if (typeof msg.onlineClients === 'number') {
+              this.onlineClients = msg.onlineClients;
+            }
+            if (typeof msg.appTimeOffsetMs === 'number' && msg.appTimeOffsetMs !== this.appTimeOffsetMs) {
+              this.appTimeOffsetMs = msg.appTimeOffsetMs;
+            }
+            // If server has a newer revision than us, request full state immediately
+            if (typeof msg.revision === 'number' && msg.revision > this.revision) {
+              socket.send(JSON.stringify({ type: 'REQUEST_STATE' }));
+            }
+            this.lastSyncedAt = new Date(this.getAppTimeMs()).toISOString();
+            this.emitToListeners();
+          }
+        } catch {
+          // Ignore malformed WS message
+        }
+      };
+
+      socket.onclose = () => {
+        this.ws = null;
+        if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+        this.reconnectTimer = setTimeout(() => this.connectWebSocket(), 2500);
+      };
+
+      socket.onerror = () => {
+        socket.close();
+      };
+    } catch {
+      // Fallback to HTTP polling / BroadcastChannel
+    }
+  }
+
+  private async fetchStateFromHttp(forceApply: boolean = false) {
+    if (typeof window === 'undefined' || typeof fetch === 'undefined') return;
+    const sentAt = Date.now();
+    try {
+      const res = await fetch('/api/state', { cache: 'no-store' });
+      if (!res.ok) return;
+      const data = await res.json();
+      if (data && data.state) {
+        this.isConnected = true;
+        if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+          this.transport = 'http-poll';
+        }
+        this.applyRemoteSnapshot(
+          data.state,
+          data.serverTimeMs,
+          data.onlineClients,
+          forceApply,
+          sentAt
+        );
+      }
+    } catch {
+      if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+        this.transport = typeof BroadcastChannel !== 'undefined' ? 'broadcast' : 'connecting';
+      }
+    }
+  }
+
+  private pushStateToRemote(updatedBy: string, lastAction: string) {
+    if (typeof window === 'undefined') return;
+    const snapshot = this.getSnapshot();
+
+    // 1. Broadcast to local tabs immediately
+    if (this.broadcastChannel) {
+      try {
+        this.broadcastChannel.postMessage({
+          type: 'STATE_UPDATED',
+          state: snapshot,
+          senderId: this.clientId,
+          serverTimeMs: Date.now() + this.serverClockOffsetMs,
+          onlineClients: this.onlineClients,
+        });
+      } catch {
+        // Ignore
+      }
+    }
+
+    // 2. Push to authoritative server over WebSocket or HTTP POST
+    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+      try {
+        this.ws.send(
+          JSON.stringify({
+            type: 'PUSH_STATE',
+            state: snapshot,
+            updatedBy,
+            lastAction,
+            senderId: this.clientId,
+          })
+        );
+        return;
+      } catch {
+        // Fall through to HTTP POST
+      }
+    }
+
+    fetch('/api/state', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        state: snapshot,
+        updatedBy,
+        lastAction,
+        senderId: this.clientId,
+      }),
+    })
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => {
+        if (data && data.state) {
+          this.isConnected = true;
+          if (typeof data.serverTimeMs === 'number') {
+            this.serverClockOffsetMs = calculateServerClockOffset(data.serverTimeMs, Date.now());
+          }
+          if (typeof data.onlineClients === 'number') {
+            this.onlineClients = data.onlineClients;
+          }
+          this.revision = data.state.revision ?? this.revision;
+          this.lastSyncedAt = new Date(this.getAppTimeMs()).toISOString();
+          this.emitToListeners();
+        }
+      })
+      .catch(() => {});
   }
 
   private loadFromStorage() {
@@ -73,6 +515,7 @@ export class ElectionStore {
       const savedVotes = localStorage.getItem(`${STORAGE_KEY_PREFIX}_votes`);
       const savedCommittee = localStorage.getItem(`${STORAGE_KEY_PREFIX}_committee`);
       const savedLogs = localStorage.getItem(`${STORAGE_KEY_PREFIX}_logs`);
+      const savedMeta = localStorage.getItem(`${STORAGE_KEY_PREFIX}_meta`);
 
       if (savedSchool) this.school = JSON.parse(savedSchool);
       if (savedPeriods) this.periods = JSON.parse(savedPeriods);
@@ -81,6 +524,12 @@ export class ElectionStore {
       if (savedVotes) this.votes = JSON.parse(savedVotes);
       if (savedCommittee) this.committee = JSON.parse(savedCommittee);
       if (savedLogs) this.auditLogs = JSON.parse(savedLogs);
+      if (savedMeta) {
+        const meta = JSON.parse(savedMeta);
+        if (typeof meta.revision === 'number') this.revision = meta.revision;
+        if (typeof meta.appTimeOffsetMs === 'number') this.appTimeOffsetMs = meta.appTimeOffsetMs;
+        if (meta.updatedAt) this.updatedAt = meta.updatedAt;
+      }
     } catch {
       // Ignore parse errors and fallback to initial
     }
@@ -96,6 +545,17 @@ export class ElectionStore {
       localStorage.setItem(`${STORAGE_KEY_PREFIX}_votes`, JSON.stringify(this.votes));
       localStorage.setItem(`${STORAGE_KEY_PREFIX}_committee`, JSON.stringify(this.committee));
       localStorage.setItem(`${STORAGE_KEY_PREFIX}_logs`, JSON.stringify(this.auditLogs));
+      localStorage.setItem(
+        `${STORAGE_KEY_PREFIX}_meta`,
+        JSON.stringify({
+          revision: this.revision,
+          updatedAt: this.updatedAt,
+          updatedBy: this.updatedBy,
+          lastAction: this.lastAction,
+          appTimeOffsetMs: this.appTimeOffsetMs,
+        })
+      );
+      localStorage.setItem(`${STORAGE_KEY_PREFIX}_snapshot`, JSON.stringify(this.getSnapshot()));
     } catch {
       // Storage quota or disabled
     }
@@ -111,7 +571,7 @@ export class ElectionStore {
     this.committee = INITIAL_COMMITTEE;
     this.auditLogs = INITIAL_AUDIT_LOGS;
     this.logAudit('Admin Sekolah', 'RESET_DATA_DEMO', 'Database disetel ulang ke dataset simulasi awal.', '127.0.0.1', 'WARNING');
-    this.notify();
+    this.notify('Admin Sekolah', 'RESET_DATA_DEMO');
   }
 
   // --- SCHOOL CONFIGURATION ---
@@ -122,7 +582,7 @@ export class ElectionStore {
   public updateSchool(updated: Partial<SchoolConfig>) {
     this.school = { ...this.school, ...updated };
     this.logAudit('Admin Sekolah', 'UPDATE_KONFIGURASI_SEKOLAH', `Identitas sekolah diperbarui: ${this.school.name}`, '192.168.10.1', 'INFO');
-    this.notify();
+    this.notify('Admin Sekolah', 'UPDATE_KONFIGURASI_SEKOLAH');
   }
 
   // --- MULTI-PERIOD DYNAMIC MANAGEMENT ---
@@ -154,14 +614,14 @@ export class ElectionStore {
       '192.168.10.1',
       'INFO'
     );
-    this.notify();
+    this.notify('Admin Sekolah', 'AKTIVASI_PERIODE_BARU');
   }
 
   public addPeriod(period: Omit<ElectionPeriod, 'id' | 'createdAt'>): ElectionPeriod {
     const newPeriod: ElectionPeriod = {
       ...period,
       id: `period_${Date.now()}`,
-      createdAt: new Date().toISOString(),
+      createdAt: new Date(this.getAppTimeMs()).toISOString(),
     };
     if (newPeriod.status === 'active') {
       // Demote others
@@ -169,7 +629,7 @@ export class ElectionStore {
     }
     this.periods.push(newPeriod);
     this.logAudit('Admin Sekolah', 'BUAT_PERIODE_BARU', `Menambahkan periode pemilihan: ${newPeriod.periodName}`, '192.168.10.1', 'INFO');
-    this.notify();
+    this.notify('Admin Sekolah', 'BUAT_PERIODE_BARU');
     return newPeriod;
   }
 
@@ -181,7 +641,7 @@ export class ElectionStore {
       return p;
     });
     this.logAudit('Admin Sekolah', 'UPDATE_PERIODE', `Memperbarui data periode ${periodId}`, '192.168.10.1', 'INFO');
-    this.notify();
+    this.notify('Admin Sekolah', 'UPDATE_PERIODE');
   }
 
   public deletePeriod(periodId: string): { success: boolean; message: string } {
@@ -220,7 +680,7 @@ export class ElectionStore {
       '192.168.10.1',
       'WARNING'
     );
-    this.notify();
+    this.notify('Admin Sekolah', 'HAPUS_PERIODE');
 
     return {
       success: true,
@@ -249,7 +709,7 @@ export class ElectionStore {
       '192.168.10.15',
       'INFO'
     );
-    this.notify();
+    this.notify('Panitia', 'TAMBAH_PASLON');
     return newCandidate;
   }
 
@@ -261,13 +721,13 @@ export class ElectionStore {
       return c;
     });
     this.logAudit('Panitia', 'UPDATE_PASLON', `Data kandidat ID ${candidateId} diperbarui.`, '192.168.10.15', 'INFO');
-    this.notify();
+    this.notify('Panitia', 'UPDATE_PASLON');
   }
 
   public deleteCandidate(candidateId: string) {
     this.candidates = this.candidates.filter((c) => c.id !== candidateId);
     this.logAudit('Panitia', 'HAPUS_PASLON', `Menghapus paslon ID ${candidateId}`, '192.168.10.15', 'WARNING');
-    this.notify();
+    this.notify('Panitia', 'HAPUS_PASLON');
   }
 
   // --- DPT (DAFTAR PEMILIH TETAP) MANAGEMENT ---
@@ -316,7 +776,7 @@ export class ElectionStore {
 
     this.voters.push(newVoter);
     this.logAudit('Panitia', 'TAMBAH_PEMILIH_DPT', `Siswa ${newVoter.fullName} (${newVoter.nisn}) ditambahkan ke DPT.`, '192.168.10.15', 'INFO');
-    this.notify();
+    this.notify('Panitia', 'TAMBAH_PEMILIH_DPT');
     return { success: true, message: 'Pemilih berhasil ditambahkan', voter: newVoter };
   }
 
@@ -385,7 +845,7 @@ export class ElectionStore {
       '192.168.10.15',
       'INFO'
     );
-    this.notify();
+    this.notify('Panitia', 'IMPORT_DPT_MASSAL');
     return { added, skipped, errors };
   }
 
@@ -409,7 +869,7 @@ export class ElectionStore {
       '192.168.10.15',
       'WARNING'
     );
-    this.notify();
+    this.notify('Panitia', 'RESET_PIN_PEMILIH');
     return { success: true, message: 'PIN berhasil direset.', newPin };
   }
 
@@ -429,7 +889,7 @@ export class ElectionStore {
     });
     if (count > 0) {
       this.logAudit('Panitia', 'GENERATE_PIN_MASSAL', `Membuat ${count} PIN token baru untuk pemilih yang belum memiliki PIN.`, '192.168.10.15', 'INFO');
-      this.notify();
+      this.notify('Panitia', 'GENERATE_PIN_MASSAL');
     }
     return count;
   }
@@ -442,7 +902,7 @@ export class ElectionStore {
       }
       return v;
     });
-    this.notify();
+    this.notify('Panitia', 'CETAK_KARTU_TOKEN');
   }
 
   public deleteVoter(voterId: string) {
@@ -452,7 +912,7 @@ export class ElectionStore {
     }
     this.voters = this.voters.filter((v) => v.id !== voterId);
     this.logAudit('Panitia', 'HAPUS_PEMILIH', `Menghapus pemilih ${voter?.fullName || voterId}`, '192.168.10.15', 'WARNING');
-    this.notify();
+    this.notify('Panitia', 'HAPUS_PEMILIH');
     return { success: true, message: 'Pemilih berhasil dihapus dari DPT.' };
   }
 
@@ -461,7 +921,7 @@ export class ElectionStore {
     const count = this.voters.filter((v) => v.electionPeriodId === targetPeriod).length;
     this.voters = this.voters.filter((v) => v.electionPeriodId !== targetPeriod);
     this.logAudit('Panitia', 'HAPUS_SEMUA_DPT', `Menghapus seluruh ${count} pemilih DPT periode.`, '192.168.10.15', 'WARNING');
-    this.notify();
+    this.notify('Panitia', 'HAPUS_SEMUA_DPT');
     return { success: true, message: `Berhasil menghapus seluruh ${count} siswa dari DPT.`, count };
   }
 
@@ -488,7 +948,7 @@ export class ElectionStore {
     this.votes = this.votes.filter((v) => v.electionPeriodId !== targetPeriod);
 
     this.logAudit('Panitia', 'RESET_STATUS_BILIK', `Mereset status bilik seluruh siswa & perolehan suara periode ke pengaturan awal.`, '192.168.10.15', 'WARNING');
-    this.notify();
+    this.notify('Panitia', 'RESET_STATUS_BILIK');
     return { success: true, count };
   }
 
@@ -510,7 +970,7 @@ export class ElectionStore {
       '192.168.10.15',
       'WARNING'
     );
-    this.notify();
+    this.notify('Panitia', 'RESET_STATUS_PEMILIH_TUNGGAL');
     return { success: true, message: `Status bilik ${voter.fullName} berhasil direset ke Belum Memilih. PIN baru: ${newPin}`, newPin };
   }
 
@@ -598,7 +1058,7 @@ export class ElectionStore {
       return { success: false, message: 'Pasangan calon yang dipilih tidak sah.' };
     }
 
-    const now = new Date().toISOString();
+    const now = new Date(this.getAppTimeMs()).toISOString();
 
     // 1. Insert strictly anonymous vote
     const anonymousVote: AnonymousVote = {
@@ -629,7 +1089,7 @@ export class ElectionStore {
       'INFO'
     );
 
-    this.notify();
+    this.notify('Siswa', 'TRANSAKSI_SUARA_ANONIM');
 
     return {
       success: true,
@@ -651,18 +1111,18 @@ export class ElectionStore {
     };
     this.committee.push(newMember);
     this.logAudit('Admin Sekolah', 'TAMBAH_PANITIA', `Menambahkan anggota panitia: ${newMember.memberName} (${newMember.role})`, '192.168.10.1', 'INFO');
-    this.notify();
+    this.notify('Admin Sekolah', 'TAMBAH_PANITIA');
     return newMember;
   }
 
   public updateCommitteeMember(id: string, updates: Partial<CommitteeMember>) {
     this.committee = this.committee.map((c) => (c.id === id ? { ...c, ...updates } : c));
-    this.notify();
+    this.notify('Admin Sekolah', 'UPDATE_PANITIA');
   }
 
   public deleteCommitteeMember(id: string) {
     this.committee = this.committee.filter((c) => c.id !== id);
-    this.notify();
+    this.notify('Admin Sekolah', 'HAPUS_PANITIA');
   }
 
   // --- AUDIT LOGS ---
@@ -684,7 +1144,7 @@ export class ElectionStore {
       action,
       details,
       ipAddress,
-      timestamp: new Date().toISOString(),
+      timestamp: new Date(this.getAppTimeMs()).toISOString(),
       severity,
     };
     this.auditLogs.unshift(newLog);

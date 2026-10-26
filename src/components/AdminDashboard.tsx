@@ -7,18 +7,19 @@
  * Official BAHP Certification, and Security Audit Trails.
  */
 
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { 
   Building2, Calendar, FileCheck, ShieldAlert, Award, Plus, 
   CheckCircle2, Clock, Archive, Printer, RotateCcw, Save, X,
-  AlertTriangle, KeyRound, Trash2, Film, Upload, Play, FileVideo, Sparkles, Video, FileText
+  AlertTriangle, KeyRound, Trash2, Film, Upload, Play, FileVideo, Sparkles, Video, FileText, Radio, RefreshCw
 } from 'lucide-react';
-import { SchoolConfig, ElectionPeriod, CommitteeMember, AuditLog, ElectionSummary } from '../types';
+import { SchoolConfig, ElectionPeriod, CommitteeMember, AuditLog, ElectionSummary, RealtimeSyncMetadata } from '../types';
 import { electionStore } from '../lib/store';
 import { PrintBeritaAcara } from './PrintBeritaAcara';
 import { PrintSkPanitia } from './PrintSkPanitia';
 import { OpeningSequence } from './OpeningSequence';
 import { SchoolCrestLogo, OsisLogoBadge } from './CandidateAvatar';
+import { formatAppTimeDisplay } from '../lib/realtimeSync';
 
 interface AdminDashboardProps {
   school: SchoolConfig;
@@ -26,6 +27,8 @@ interface AdminDashboardProps {
   committee: CommitteeMember[];
   auditLogs: AuditLog[];
   summary: ElectionSummary;
+  appTimeMs: number;
+  syncMeta: RealtimeSyncMetadata;
 }
 
 export const AdminDashboard: React.FC<AdminDashboardProps> = ({
@@ -34,6 +37,8 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   committee,
   auditLogs,
   summary,
+  appTimeMs,
+  syncMeta,
 }) => {
   const [activeTab, setActiveTab] = useState<'periods' | 'school' | 'committee' | 'audit' | 'video'>('periods');
   const [showNewPeriodModal, setShowNewPeriodModal] = useState(false);
@@ -43,6 +48,9 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const [showSkModal, setShowSkModal] = useState(false);
   const [confirmDeletePeriod, setConfirmDeletePeriod] = useState<ElectionPeriod | null>(null);
   const [alertNotice, setAlertNotice] = useState<string | null>(null);
+  const [customTimeInput, setCustomTimeInput] = useState<string>('08:00');
+
+  const formattedClock = formatAppTimeDisplay(appTimeMs);
 
   const handleOpenBahpModal = (periodId?: string) => {
     const targetPeriodId = periodId || summary.period.id;
@@ -55,8 +63,13 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const [openingVideoInputUrl, setOpeningVideoInputUrl] = useState(school.openingVideoUrl || '');
   const [isUploadingVideo, setIsUploadingVideo] = useState(false);
 
-  // School form state
+  // School form state synced with live school config
   const [schoolForm, setSchoolForm] = useState<SchoolConfig>(school);
+
+  useEffect(() => {
+    setSchoolForm(school);
+    setOpeningVideoInputUrl(school.openingVideoUrl || '');
+  }, [school]);
 
   // New period state
   const [newPeriod, setNewPeriod] = useState({
@@ -66,7 +79,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     endDate: '2027-09-15',
     votingOpenTime: '07:30',
     votingCloseTime: '15:00',
-    status: 'draft' as 'draft' | 'active' | 'completed',
+    status: 'draft' as 'draft' as 'draft' | 'active' | 'completed',
     description: 'Periode pemilihan baru jenjang SMP',
   });
 
@@ -83,6 +96,20 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const showAlert = (msg: string) => {
     setAlertNotice(msg);
     setTimeout(() => setAlertNotice(null), 4000);
+  };
+
+  const handleApplyUnifiedClockTime = (timeHhMm: string) => {
+    const [hh, mm] = timeHhMm.split(':').map((n) => parseInt(n, 10));
+    if (Number.isNaN(hh) || Number.isNaN(mm)) return;
+    const targetDate = new Date(appTimeMs);
+    targetDate.setHours(hh, mm, 0, 0);
+    electionStore.setApplicationTime(targetDate.getTime());
+    showAlert(`Waktu Aplikasi seluruh perangkat klien diselaraskan ke pukul ${timeHhMm}:00 WIB.`);
+  };
+
+  const handleResetUnifiedClock = () => {
+    electionStore.resetApplicationTimeToRealtime();
+    showAlert('Waktu Aplikasi seluruh perangkat dikembalikan ke jam server real-time (WIB).');
   };
 
   const handleUploadOsisLogo = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -299,6 +326,88 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
         </div>
       )}
 
+      {/* Real-Time Online Sync & Unified Application Time Control Panel */}
+      <div className="rounded-3xl glass-panel border border-sky-200/80 bg-gradient-to-r from-sky-50/90 via-white/95 to-indigo-50/90 p-5 md:p-6 shadow-md">
+        <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-5">
+          <div className="space-y-1.5">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-black bg-emerald-100 text-emerald-800 border border-emerald-300">
+                <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
+                <Radio className="w-3.5 h-3.5 text-emerald-600" />
+                <span>SINKRONISASI ONLINE REAL-TIME AKTIF</span>
+              </span>
+              <span className="text-xs font-mono font-bold text-slate-600 bg-white px-2.5 py-1 rounded-lg border border-slate-200">
+                {syncMeta.onlineClients} Perangkat Terhubung · Rev #{syncMeta.revision}
+              </span>
+              <span className="text-xs font-semibold text-sky-800 bg-sky-100/80 px-2.5 py-1 rounded-lg border border-sky-200">
+                Waktu Aplikasi Sama di Semua Klien
+              </span>
+            </div>
+            <h2 className="text-sm md:text-base font-black text-slate-900 tracking-tight">
+              Pusat Kendali Waktu Aplikasi Terpadu & Sinkronisasi Klien
+            </h2>
+            <p className="text-xs text-slate-600 max-w-2xl leading-relaxed">
+              Setiap perubahan identitas sekolah, jadwal periode, kandidat, DPT, maupun jam aplikasi yang dilakukan Admin akan langsung diikuti oleh seluruh perangkat klien secara otomatis pada waktu aplikasi yang sama.
+            </p>
+          </div>
+
+          <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-3 shrink-0 bg-white/90 p-3.5 rounded-2xl border border-slate-200/90 shadow-xs">
+            <div className="px-3 py-1.5 rounded-xl bg-slate-950 text-white flex flex-col justify-center">
+              <span className="text-[10px] font-bold uppercase tracking-wider text-sky-400">
+                Waktu Aplikasi Saat Ini
+              </span>
+              <div className="flex items-baseline gap-1.5 font-mono">
+                <span className="text-lg font-black tracking-tight" data-testid="admin-app-clock">
+                  {formattedClock.timeString}
+                </span>
+                <span className="text-xs font-bold text-sky-300">WIB</span>
+              </div>
+              <span className="text-[10px] text-slate-400">{formattedClock.dateString}</span>
+            </div>
+
+            <div className="flex flex-col gap-2">
+              <div className="flex items-center gap-1.5">
+                <input
+                  type="time"
+                  aria-label="Atur Jam Waktu Aplikasi Terpadu"
+                  value={customTimeInput}
+                  onChange={(e) => setCustomTimeInput(e.target.value)}
+                  className="px-2.5 py-1.5 text-xs font-mono font-bold rounded-xl border border-slate-300 bg-white text-slate-900 focus:outline-none focus:ring-2 focus:ring-sky-500"
+                />
+                <button
+                  type="button"
+                  onClick={() => handleApplyUnifiedClockTime(customTimeInput)}
+                  className="px-3 py-1.5 rounded-xl bg-sky-600 hover:bg-sky-500 text-white text-xs font-bold transition-all cursor-pointer whitespace-nowrap shadow-xs"
+                >
+                  Set Jam Semua Klien
+                </button>
+              </div>
+              <div className="flex items-center gap-1.5">
+                <button
+                  type="button"
+                  onClick={handleResetUnifiedClock}
+                  className="px-2.5 py-1 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 text-[11px] font-semibold flex items-center gap-1 transition-all cursor-pointer"
+                >
+                  <RotateCcw className="w-3 h-3" />
+                  <span>Jam Server Real-Time</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    electionStore.forceResyncWithServer();
+                    showAlert('Sinkronisasi paksa ke seluruh klien berhasil dikirim.');
+                  }}
+                  className="px-2.5 py-1 rounded-lg bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-200 text-[11px] font-semibold flex items-center gap-1 transition-all cursor-pointer"
+                >
+                  <RefreshCw className="w-3 h-3" />
+                  <span>Sinkronkan Sekarang</span>
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
       {/* TAB 1: MULTI-PERIOD MANAGEMENT */}
       {activeTab === 'periods' && (
         <div className="space-y-6">
@@ -339,7 +448,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                     isActive ? 'border-sky-400 bg-sky-50/50 ring-2 ring-sky-400/30' : 'border-white/80'
                   }`}
                 >
-                  <div className="space-y-1">
+                  <div className="space-y-2">
                     <div className="flex items-center gap-2">
                       <span className="text-xs font-mono font-bold text-slate-500 bg-white/60 px-2 py-0.5 rounded-lg border border-white/80">
                         TA {p.academicYear}
@@ -365,6 +474,31 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                     <p className="text-xs text-slate-600 max-w-xl leading-relaxed">
                       {p.description || `Jadwal pemungutan suara: ${p.startDate} (${p.votingOpenTime} - ${p.votingCloseTime} WIB)`}
                     </p>
+                    <div className="flex flex-wrap items-center gap-2 pt-1">
+                      <span className="text-[11px] font-semibold text-slate-600">Jam Buka - Tutup Pemilihan:</span>
+                      <input
+                        type="time"
+                        aria-label={`Jam buka pemilihan ${p.periodName}`}
+                        value={p.votingOpenTime}
+                        onChange={(e) => {
+                          electionStore.updatePeriod(p.id, { votingOpenTime: e.target.value });
+                          showAlert(`Jam buka pemilihan diperbarui ke ${e.target.value} WIB untuk seluruh klien.`);
+                        }}
+                        className="px-2 py-1 text-xs font-mono font-bold rounded-lg border border-slate-300 bg-white text-slate-900"
+                      />
+                      <span className="text-xs text-slate-400">s/d</span>
+                      <input
+                        type="time"
+                        aria-label={`Jam tutup pemilihan ${p.periodName}`}
+                        value={p.votingCloseTime}
+                        onChange={(e) => {
+                          electionStore.updatePeriod(p.id, { votingCloseTime: e.target.value });
+                          showAlert(`Jam tutup pemilihan diperbarui ke ${e.target.value} WIB untuk seluruh klien.`);
+                        }}
+                        className="px-2 py-1 text-xs font-mono font-bold rounded-lg border border-slate-300 bg-white text-slate-900"
+                      />
+                      <span className="text-[11px] font-bold text-slate-500">WIB</span>
+                    </div>
                   </div>
 
                   <div className="flex items-center gap-2 shrink-0">
