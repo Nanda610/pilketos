@@ -426,8 +426,8 @@ export class ElectionStore {
             if (typeof msg.appTimeOffsetMs === 'number' && msg.appTimeOffsetMs !== this.appTimeOffsetMs) {
               this.appTimeOffsetMs = msg.appTimeOffsetMs;
             }
-            // If server has a newer revision than us, request full state immediately
-            if (typeof msg.revision === 'number' && msg.revision > this.revision) {
+            // If server has a different revision than us, request full state immediately
+            if (typeof msg.revision === 'number' && msg.revision !== this.revision) {
               socket.send(JSON.stringify({ type: 'REQUEST_STATE' }));
             }
             this.lastSyncedAt = new Date(this.getAppTimeMs()).toISOString();
@@ -457,7 +457,13 @@ export class ElectionStore {
   private async checkRevisionAndSync() {
     if (typeof window === 'undefined' || typeof fetch === 'undefined') return;
     try {
-      const res = await fetch('/api/revision', { cache: 'no-store' });
+      const res = await fetch(`/api/revision?_t=${Date.now()}`, {
+        cache: 'no-store',
+        headers: {
+          'Cache-Control': 'no-cache, no-store, must-revalidate',
+          Pragma: 'no-cache',
+        },
+      });
       if (!res.ok) {
         await this.fetchStateFromHttp(false);
         return;
@@ -472,8 +478,8 @@ export class ElectionStore {
       if (typeof data.appTimeOffsetMs === 'number' && data.appTimeOffsetMs !== this.appTimeOffsetMs) {
         this.appTimeOffsetMs = data.appTimeOffsetMs;
       }
-      if (typeof data.revision === 'number' && data.revision > this.revision) {
-        // Server has a newer revision than us, immediately fetch full authoritative snapshot!
+      if (typeof data.revision === 'number' && data.revision !== this.revision) {
+        // Server has a different revision than us, immediately fetch full authoritative snapshot!
         await this.fetchStateFromHttp(true);
       } else {
         this.isConnected = true;
@@ -491,7 +497,13 @@ export class ElectionStore {
     if (typeof window === 'undefined' || typeof fetch === 'undefined') return;
     const sentAt = Date.now();
     try {
-      const res = await fetch('/api/state', { cache: 'no-store' });
+      const res = await fetch(`/api/state?_t=${Date.now()}`, {
+        cache: 'no-store',
+        headers: {
+          'Cache-Control': 'no-cache, no-store, must-revalidate',
+          Pragma: 'no-cache',
+        },
+      });
       if (!res.ok) return;
       const data = await res.json();
       if (data && data.state) {
