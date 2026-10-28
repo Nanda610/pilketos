@@ -118,6 +118,28 @@ export interface AnonymousVote {
   // NOTE: Voter ID is purposefully NOT stored here to enforce strict LUBER-JURDIL privacy!
 }
 
+export type UserRole = 'admin' | 'panitia';
+
+export interface UserAccount {
+  id: string;
+  username: string;
+  name: string;
+  role: UserRole;
+  passwordPlain: string;
+  passwordHash?: string;
+  updatedAt?: string;
+  lastLoginAt?: string;
+}
+
+export interface AuthSession {
+  id: string;
+  username: string;
+  name: string;
+  role: UserRole;
+  token: string;
+  loginTime: string;
+}
+
 export interface AuditLog {
   id: string;
   userId: string;
@@ -161,6 +183,7 @@ export interface ElectionStateSnapshot {
   votes: AnonymousVote[];
   committee: CommitteeMember[];
   auditLogs: AuditLog[];
+  accounts?: UserAccount[];
 }
 
 export interface RealtimeSyncMetadata {

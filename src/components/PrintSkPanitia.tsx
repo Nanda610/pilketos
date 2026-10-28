@@ -16,7 +16,7 @@ import { createPortal } from 'react-dom';
 import { 
   Printer, X, FileText, Plus, Trash2, ChevronLeft, ChevronRight,
   ShieldCheck, Award, QrCode, CheckCircle2, Sliders, Eye, RotateCcw,
-  Sparkles, BookOpen, Layers, Edit3, Save, Calendar, MapPin, Building,
+  BookOpen, Layers, Edit3, Save, Calendar, MapPin, Building,
   UserCheck, AlertCircle, ArrowUp, ArrowDown, Check, UserPlus,
   Mail, Hash, Phone, Globe, Upload, Image as ImageIcon, Move, Maximize2,
   Minimize2, ZoomIn, ZoomOut

@@ -7,18 +7,20 @@
  * animated number counters ("pencapaian hasil angka"), and celebratory confetti animations.
  */
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { safeConfetti as confetti } from '../utils/confettiHelper';
-import { motion } from 'motion/react';
+import { motion, AnimatePresence } from 'motion/react';
 import { 
   Users, CheckCircle2, Clock, Vote, ChevronRight, Play, Pause, X,
-  BarChart3, PieChart, Sparkles, Volume2, VolumeX, RotateCcw,
-  Trophy, PartyPopper, Flame
+  BarChart3, PieChart, Volume2, VolumeX, RotateCcw,
+  Trophy, PartyPopper, Flame, Radio
 } from 'lucide-react';
 import { SchoolConfig, ElectionSummary, Candidate, RealtimeSyncMetadata } from '../types';
 import { CandidateAvatar, SchoolCrestLogo } from './CandidateAvatar';
 import { CandidateVideoDisplay } from './CandidateVideoDisplay';
 import { formatAppTimeDisplay, evaluateVotingSchedule } from '../lib/realtimeSync';
+import { electionStore } from '../lib/store';
+import { GarudaIcon } from './GarudaIcon';
 
 interface QuickCountDashboardProps {
   school: SchoolConfig;
@@ -29,26 +31,41 @@ interface QuickCountDashboardProps {
 }
 
 // Helper component for smooth numeric counter animation ("pencapaian hasil angka")
-const AnimatedNumber: React.FC<{ value: number; duration?: number; suffix?: string; prefix?: string }> = ({
+const AnimatedNumber: React.FC<{
+  value: number;
+  duration?: number;
+  suffix?: string;
+  prefix?: string;
+  decimals?: number;
+}> = ({
   value,
-  duration = 900,
+  duration = 600,
   suffix = '',
   prefix = '',
+  decimals = 0,
 }) => {
-  const [displayValue, setDisplayValue] = useState(0);
+  const [displayValue, setDisplayValue] = useState(value);
+  const prevValueRef = useRef(value);
 
   useEffect(() => {
     let startTime: number | null = null;
     let animationFrameId: number;
-    const startValue = 0;
+    const startValue = prevValueRef.current;
     const targetValue = value;
+    prevValueRef.current = value;
+
+    if (startValue === targetValue) {
+      setDisplayValue(targetValue);
+      return;
+    }
 
     const updateNumber = (timestamp: number) => {
       if (!startTime) startTime = timestamp;
       const progress = Math.min((timestamp - startTime) / duration, 1);
       // Ease-out quad formula
       const easeOut = 1 - (1 - progress) * (1 - progress);
-      const current = Math.floor(startValue + (targetValue - startValue) * easeOut);
+      const raw = startValue + (targetValue - startValue) * easeOut;
+      const current = decimals > 0 ? Number(raw.toFixed(decimals)) : Math.floor(raw);
       setDisplayValue(current);
 
       if (progress < 1) {
@@ -60,12 +77,20 @@ const AnimatedNumber: React.FC<{ value: number; duration?: number; suffix?: stri
 
     animationFrameId = requestAnimationFrame(updateNumber);
     return () => cancelAnimationFrame(animationFrameId);
-  }, [value, duration]);
+  }, [value, duration, decimals]);
+
+  const formatted =
+    decimals > 0
+      ? displayValue.toLocaleString('id-ID', {
+          minimumFractionDigits: decimals,
+          maximumFractionDigits: decimals,
+        })
+      : displayValue.toLocaleString('id-ID');
 
   return (
     <span>
       {prefix}
-      {displayValue.toLocaleString('id-ID')}
+      {formatted}
       {suffix}
     </span>
   );
@@ -87,9 +112,68 @@ export const QuickCountDashboard: React.FC<QuickCountDashboardProps> = ({
 
   const [showCelebrationModal, setShowCelebrationModal] = useState(false);
 
+  // Subscribe to real-time store changes for instant visual update across all viewers
+  const [, setStoreVersion] = useState(0);
+  useEffect(() => {
+    const unsub = electionStore.subscribe(() => {
+      setStoreVersion((v) => v + 1);
+    });
+    return () => unsub();
+  }, []);
+
   const { period, totalVoters, totalVoted, totalUnvoted, participationPercentage, candidatesResults, classParticipation } = summary;
   const formattedClock = formatAppTimeDisplay(appTimeMs);
   const scheduleStatus = evaluateVotingSchedule(period, appTimeMs);
+
+  const [newVoteAlert, setNewVoteAlert] = useState<{
+    candidateName: string;
+    ballotNumber: number;
+    timestamp: string;
+    totalVotes: number;
+  } | null>(null);
+  const [highlightCandidateId, setHighlightCandidateId] = useState<string | null>(null);
+  const [isManualSyncing, setIsManualSyncing] = useState(false);
+
+  // Track previous counts to detect real-time vote transactions coming from Bilik Suara
+  const prevTotalVotedRef = useRef<number>(summary.totalVoted);
+  const prevCountsRef = useRef<Record<string, number>>({});
+
+  useEffect(() => {
+    // If total votes increased, detect which candidate gained the vote and trigger live visual notification
+    if (prevTotalVotedRef.current !== undefined && summary.totalVoted > prevTotalVotedRef.current) {
+      const gained = summary.candidatesResults.find((r) => {
+        const oldVal = prevCountsRef.current[r.candidate.id] || 0;
+        return r.voteCount > oldVal;
+      });
+
+      if (gained) {
+        setHighlightCandidateId(gained.candidate.id);
+        setNewVoteAlert({
+          candidateName: `${gained.candidate.chairmanName} & ${gained.candidate.viceChairmanName}`,
+          ballotNumber: gained.candidate.ballotNumber,
+          timestamp: new Date().toLocaleTimeString('id-ID'),
+          totalVotes: summary.totalVoted,
+        });
+
+        // Clear highlight after 4 seconds
+        setTimeout(() => {
+          setHighlightCandidateId((curr) => (curr === gained.candidate.id ? null : curr));
+        }, 4000);
+
+        // Auto-dismiss banner after 6 seconds
+        setTimeout(() => {
+          setNewVoteAlert((curr) => (curr?.timestamp ? null : curr));
+        }, 6000);
+      }
+    }
+
+    prevTotalVotedRef.current = summary.totalVoted;
+    const currentMap: Record<string, number> = {};
+    summary.candidatesResults.forEach((r) => {
+      currentMap[r.candidate.id] = r.voteCount;
+    });
+    prevCountsRef.current = currentMap;
+  }, [summary.totalVoted, summary.candidatesResults]);
 
   // Keep selectedCandidate synced if Admin/Panitia edits candidate while modal is open
   useEffect(() => {
@@ -253,11 +337,11 @@ export const QuickCountDashboard: React.FC<QuickCountDashboardProps> = ({
           <div className="flex items-center justify-between text-slate-500 mb-2">
             <span className="text-xs font-bold uppercase tracking-wider text-sky-700">Partisipasi (Turnout)</span>
             <div className="w-8 h-8 rounded-xl bg-sky-500/15 flex items-center justify-center text-sky-600">
-              <Sparkles className="w-4 h-4" />
+              <GarudaIcon className="w-4 h-4" />
             </div>
           </div>
           <div className="text-2xl md:text-3xl font-black text-sky-600 font-mono-numbers">
-            <AnimatedNumber value={participationPercentage} suffix="%" />
+            <AnimatedNumber value={participationPercentage} decimals={2} suffix="%" />
           </div>
           <div className="w-full bg-slate-200/60 rounded-full h-2 mt-2 overflow-hidden p-0.5">
             <motion.div
@@ -276,18 +360,35 @@ export const QuickCountDashboard: React.FC<QuickCountDashboardProps> = ({
         <div className="lg:col-span-8 space-y-6">
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 glass-panel p-5 rounded-3xl border border-white/80 shadow-md">
             <div>
-              <div className="flex items-center gap-2">
-                <h2 className="text-lg font-extrabold text-slate-900 tracking-tight">
+              <div className="flex flex-wrap items-center gap-2">
+                <h2 className="text-lg font-extrabold text-slate-900 tracking-tight" data-testid="layar-perolehan-suara-title">
                   Layar Perolehan Suara Pasangan Calon
                 </h2>
-                <span className="flex h-2.5 w-2.5 rounded-full bg-emerald-500 animate-ping" />
+                <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-[11px] font-black uppercase tracking-wider bg-emerald-500/15 text-emerald-800 border border-emerald-500/30">
+                  <span className="w-2 h-2 rounded-full bg-emerald-500 animate-ping" />
+                  Live · Sinkron Bilik Suara
+                </span>
               </div>
               <p className="text-xs text-slate-500 mt-0.5">
-                Pembaruan otomatis dari bilik suara digital secara real-time
+                Pembaruan otomatis dari bilik suara digital secara real-time ({syncMeta.onlineClients} perangkat terhubung online)
               </p>
             </div>
 
-            <div className="flex items-center gap-2">
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                onClick={async () => {
+                  setIsManualSyncing(true);
+                  await electionStore.forceResyncWithServer();
+                  setTimeout(() => setIsManualSyncing(false), 500);
+                }}
+                disabled={isManualSyncing}
+                className="px-3 py-1.5 rounded-xl bg-white/80 hover:bg-white text-slate-700 text-xs font-bold border border-slate-200/80 shadow-xs flex items-center gap-1.5 transition-all hover:scale-105 active:scale-95 cursor-pointer disabled:opacity-60"
+                title="Sinkronkan data perolehan suara sekarang dengan server pusat"
+              >
+                <RotateCcw className={`w-3.5 h-3.5 ${isManualSyncing ? 'animate-spin text-sky-600' : 'text-slate-600'}`} />
+                <span>{isManualSyncing ? 'Menyinkronkan...' : 'Sinkronkan'}</span>
+              </button>
+
               {leadingCandidate && leadingCandidate.voteCount > 0 && (
                 <span className="text-xs bg-emerald-500/10 text-emerald-800 border border-emerald-500/25 px-3 py-1 rounded-full font-bold flex items-center gap-1.5 backdrop-blur-xs">
                   <Trophy className="w-3.5 h-3.5 text-amber-500" />
@@ -307,10 +408,44 @@ export const QuickCountDashboard: React.FC<QuickCountDashboardProps> = ({
             </div>
           </div>
 
+          {/* Real-time Vote Arrival Notification Banner */}
+          <AnimatePresence>
+            {newVoteAlert && (
+              <motion.div
+                initial={{ opacity: 0, y: -10, scale: 0.98 }}
+                animate={{ opacity: 1, y: 0, scale: 1 }}
+                exit={{ opacity: 0, y: -10, scale: 0.98 }}
+                className="p-4 rounded-2xl bg-emerald-500/15 border-2 border-emerald-500/40 text-emerald-950 flex flex-col sm:flex-row sm:items-center justify-between gap-3 shadow-lg shadow-emerald-500/10 backdrop-blur-md"
+              >
+                <div className="flex items-center gap-3">
+                  <div className="w-10 h-10 rounded-xl bg-emerald-500 text-white flex items-center justify-center shrink-0 shadow-md">
+                    <Vote className="w-5 h-5 animate-bounce" />
+                  </div>
+                  <div>
+                    <div className="flex items-center gap-2">
+                      <span className="inline-flex items-center gap-1 text-[11px] font-black uppercase tracking-wider text-emerald-800 bg-emerald-500/20 px-2 py-0.5 rounded-md">
+                        <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-ping"></span>
+                        Suara Baru Masuk Dari Bilik
+                      </span>
+                      <span className="text-xs text-slate-600 font-mono">Pukul {newVoteAlert.timestamp} WIB</span>
+                    </div>
+                    <p className="text-sm font-extrabold text-slate-900 mt-0.5">
+                      Paslon {newVoteAlert.ballotNumber < 10 ? `0${newVoteAlert.ballotNumber}` : newVoteAlert.ballotNumber} ({newVoteAlert.candidateName}) bertambah 1 suara sah. Total perolehan sekarang: {newVoteAlert.totalVotes} suara.
+                    </p>
+                  </div>
+                </div>
+                <span className="self-start sm:self-center px-3 py-1 rounded-full bg-emerald-600 text-white text-xs font-black shadow-xs shrink-0">
+                  +1 Suara Real-time
+                </span>
+              </motion.div>
+            )}
+          </AnimatePresence>
+
           <div className="grid grid-cols-1 md:grid-cols-3 gap-5">
             {candidatesResults.map((result) => {
               const cand = result.candidate;
               const isLeading = leadingCandidate?.candidate.id === cand.id && result.voteCount > 0;
+              const isHighlighted = highlightCandidateId === cand.id;
 
               return (
                 <motion.div
@@ -320,13 +455,23 @@ export const QuickCountDashboard: React.FC<QuickCountDashboardProps> = ({
                   transition={{ duration: 0.35 }}
                   onClick={() => handleOpenCandidateModal(cand)}
                   className={`relative rounded-3xl glass-card glass-card-hover p-5 border flex flex-col justify-between transition-all duration-300 cursor-pointer group overflow-hidden ${
-                    isLeading 
+                    isHighlighted
+                      ? 'ring-4 ring-emerald-400 border-emerald-500 bg-gradient-to-b from-emerald-50/80 via-white to-white shadow-2xl shadow-emerald-500/25 scale-[1.02]'
+                      : isLeading 
                       ? 'border-sky-400/80 ring-2 ring-sky-400/25 bg-gradient-to-b from-sky-50/60 via-white/85 to-white shadow-xl shadow-sky-500/15' 
                       : 'border-white/80 shadow-md'
                   }`}
                 >
+                  {/* Real-time Vote Arrival Flash Badge */}
+                  {isHighlighted && (
+                    <div className="absolute top-0 left-0 right-0 bg-emerald-500 text-white text-[11px] font-black uppercase text-center py-1 tracking-wider animate-pulse z-20 flex items-center justify-center gap-1 shadow-md">
+                      <Vote className="w-3.5 h-3.5" />
+                      <span>+1 Suara Baru Saja Masuk!</span>
+                    </div>
+                  )}
+
                   {/* Subtle glow badge for leading paslon */}
-                  {isLeading && (
+                  {isLeading && !isHighlighted && (
                     <div className="absolute top-0 right-0 bg-gradient-to-l from-amber-400 to-sky-500 text-slate-950 font-black text-[10px] uppercase px-3 py-1 rounded-bl-2xl shadow-xs flex items-center gap-1">
                       <Flame className="w-3 h-3 fill-current text-rose-600" />
                       <span>Memimpin ({result.percentage}%)</span>
@@ -412,7 +557,7 @@ export const QuickCountDashboard: React.FC<QuickCountDashboardProps> = ({
                       <div className="flex items-center justify-between text-xs">
                         <span className="text-[11px] text-slate-400 font-medium">Persentase Masuk</span>
                         <span className="font-extrabold text-sky-600 font-mono-numbers">
-                          <AnimatedNumber value={result.percentage} suffix="%" />
+                          <AnimatedNumber value={result.percentage} decimals={2} suffix="%" />
                         </span>
                       </div>
                     </div>
@@ -667,7 +812,7 @@ export const QuickCountDashboard: React.FC<QuickCountDashboardProps> = ({
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
                   {selectedCandidate.programs.map((prog, idx) => (
                     <div key={idx} className="p-3 rounded-lg border border-slate-200 bg-slate-50/50 text-xs font-medium text-slate-800 flex items-center gap-2">
-                      <Sparkles className="w-4 h-4 text-sky-500 shrink-0" />
+                      <GarudaIcon className="w-4 h-4 text-sky-500 shrink-0" />
                       <span>{prog}</span>
                     </div>
                   ))}

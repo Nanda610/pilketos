@@ -5,7 +5,7 @@
  * Initial Seed Data for E-Pilketos / E-Pilkosim Digital System (Jenjang SMP / MTs)
  */
 
-import { SchoolConfig, ElectionPeriod, Candidate, Voter, AnonymousVote, CommitteeMember, AuditLog } from '../types';
+import { SchoolConfig, ElectionPeriod, Candidate, Voter, AnonymousVote, CommitteeMember, AuditLog, UserAccount } from '../types';
 import { hashPin } from './security';
 
 export const INITIAL_SCHOOL: SchoolConfig = {
@@ -291,3 +291,23 @@ export const INITIAL_AUDIT_LOGS: AuditLog[] = [
     severity: 'INFO',
   },
 ];
+
+export const INITIAL_ACCOUNTS: UserAccount[] = [
+  {
+    id: 'acc_admin_01',
+    username: 'admin',
+    name: 'Administrator Sekolah',
+    role: 'admin',
+    passwordPlain: 'admin123',
+    updatedAt: '2026-10-24T07:00:00Z',
+  },
+  {
+    id: 'acc_panitia_01',
+    username: 'panitia',
+    name: 'Panitia Pemilihan OSIS',
+    role: 'panitia',
+    passwordPlain: 'panitia123',
+    updatedAt: '2026-10-24T07:00:00Z',
+  },
+];
+

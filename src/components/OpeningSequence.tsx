@@ -11,12 +11,13 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { 
   Play, Pause, Volume2, VolumeX, FastForward, RotateCcw, 
-  Sparkles, CheckCircle2, Award, Vote, Users, ShieldCheck,
+  CheckCircle2, Award, Vote, Users, ShieldCheck,
   Radio, Maximize2, Minimize2
 } from 'lucide-react';
 import { SchoolConfig, ElectionPeriod, Candidate } from '../types';
 import { cinematicAudio } from '../utils/cinematicAudio';
 import { SchoolCrestLogo, CandidateAvatar } from './CandidateAvatar';
+import { GarudaIcon } from './GarudaIcon';
 
 interface OpeningSequenceProps {
   school: SchoolConfig;
@@ -407,7 +408,7 @@ export const OpeningSequence: React.FC<OpeningSequenceProps> = ({
                 <div className="relative w-full h-full flex flex-col items-center justify-center p-6 space-y-4 animate-in fade-in duration-400">
                   <div className="text-center space-y-1">
                     <span className="text-[11px] font-black uppercase tracking-[0.25em] text-emerald-400 flex items-center justify-center gap-1.5">
-                      <Sparkles className="w-3.5 h-3.5" />
+                      <GarudaIcon className="w-4 h-4 text-amber-400" />
                       <span>Putra-Putri Terbaik Bangsa</span>
                     </span>
                     <h2 className="text-xl md:text-3xl font-black text-white">
@@ -505,7 +506,7 @@ export const OpeningSequence: React.FC<OpeningSequenceProps> = ({
                       <FastForward className="w-5 h-5" />
                     </button>
                     <span className="text-[11px] text-slate-300 font-mono font-medium flex items-center gap-1.5">
-                      <Sparkles className="w-3.5 h-3.5 text-amber-400 animate-spin" />
+                      <GarudaIcon className="w-3.5 h-3.5 text-amber-400" />
                       <span>Silakan tekan tombol di atas untuk masuk ke sistem pemilihan</span>
                     </span>
                   </div>

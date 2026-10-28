@@ -11,7 +11,8 @@ import React, { useState, useEffect } from 'react';
 import { 
   Building2, Calendar, FileCheck, ShieldAlert, Award, Plus, 
   CheckCircle2, Clock, Archive, Printer, RotateCcw, Save, X,
-  AlertTriangle, KeyRound, Trash2, Film, Upload, Play, FileVideo, Sparkles, Video, FileText, Radio, RefreshCw
+  AlertTriangle, KeyRound, Trash2, Film, Upload, Play, FileVideo, Video, FileText, Radio, RefreshCw,
+  ShieldCheck, Lock, UserCheck, Eye, EyeOff
 } from 'lucide-react';
 import { SchoolConfig, ElectionPeriod, CommitteeMember, AuditLog, ElectionSummary, RealtimeSyncMetadata } from '../types';
 import { electionStore } from '../lib/store';
@@ -20,6 +21,7 @@ import { PrintSkPanitia } from './PrintSkPanitia';
 import { OpeningSequence } from './OpeningSequence';
 import { SchoolCrestLogo, OsisLogoBadge } from './CandidateAvatar';
 import { formatAppTimeDisplay } from '../lib/realtimeSync';
+import { GarudaIcon } from './GarudaIcon';
 
 interface AdminDashboardProps {
   school: SchoolConfig;
@@ -40,7 +42,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   appTimeMs,
   syncMeta,
 }) => {
-  const [activeTab, setActiveTab] = useState<'periods' | 'school' | 'committee' | 'audit' | 'video'>('periods');
+  const [activeTab, setActiveTab] = useState<'periods' | 'school' | 'committee' | 'audit' | 'video' | 'security'>('periods');
   const [showNewPeriodModal, setShowNewPeriodModal] = useState(false);
   const [showAddCommitteeModal, setShowAddCommitteeModal] = useState(false);
   const [showBahpModal, setShowBahpModal] = useState(false);
@@ -49,6 +51,23 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const [confirmDeletePeriod, setConfirmDeletePeriod] = useState<ElectionPeriod | null>(null);
   const [alertNotice, setAlertNotice] = useState<string | null>(null);
   const [customTimeInput, setCustomTimeInput] = useState<string>('08:00');
+
+  // Account & security credentials form state
+  const [adminNewPass, setAdminNewPass] = useState('');
+  const [adminConfirmPass, setAdminConfirmPass] = useState('');
+  const [panitiaNewPass, setPanitiaNewPass] = useState('');
+  const [panitiaConfirmPass, setPanitiaConfirmPass] = useState('');
+  const [showAdminPass, setShowAdminPass] = useState(false);
+  const [showPanitiaPass, setShowPanitiaPass] = useState(false);
+
+  // Reactive subscription to synchronize with remote mutations immediately
+  const [, setStoreVersion] = useState(0);
+  useEffect(() => {
+    const unsub = electionStore.subscribe(() => {
+      setStoreVersion((v) => v + 1);
+    });
+    return () => unsub();
+  }, []);
 
   const formattedClock = formatAppTimeDisplay(appTimeMs);
 
@@ -192,6 +211,53 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     }
   };
 
+  const handleUpdateAdminPassword = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!adminNewPass.trim() || adminNewPass.trim().length < 4) {
+      showAlert('Kata sandi baru minimal 4 karakter.');
+      return;
+    }
+    if (adminNewPass !== adminConfirmPass) {
+      showAlert('Konfirmasi kata sandi Administrator tidak cocok!');
+      return;
+    }
+    const res = electionStore.updateAccountPassword('admin', adminNewPass, 'Admin Sekolah');
+    if (res.success) {
+      showAlert('Kata sandi Administrator berhasil diubah!');
+      setAdminNewPass('');
+      setAdminConfirmPass('');
+    } else {
+      showAlert(res.message);
+    }
+  };
+
+  const handleUpdatePanitiaPassword = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!panitiaNewPass.trim() || panitiaNewPass.trim().length < 4) {
+      showAlert('Kata sandi baru minimal 4 karakter.');
+      return;
+    }
+    if (panitiaNewPass !== panitiaConfirmPass) {
+      showAlert('Konfirmasi kata sandi Panitia tidak cocok!');
+      return;
+    }
+    const res = electionStore.updateAccountPassword('panitia', panitiaNewPass, 'Admin Sekolah');
+    if (res.success) {
+      showAlert('Kata sandi Panitia berhasil diubah!');
+      setPanitiaNewPass('');
+      setPanitiaConfirmPass('');
+    } else {
+      showAlert(res.message);
+    }
+  };
+
+  const handleResetCredentialsDefault = () => {
+    if (confirm('Kembalikan kata sandi Admin dan Panitia ke setelan awal (admin123 / panitia123)?')) {
+      electionStore.resetAccountsToDefault('Admin Sekolah');
+      showAlert('Akun dan kata sandi berhasil dikembalikan ke setelan default.');
+    }
+  };
+
   const handleSaveOpeningVideoUrl = (url: string) => {
     electionStore.updateSchool({
       openingVideoUrl: url.trim(),
@@ -312,6 +378,18 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
           >
             <Film className="w-3.5 h-3.5 text-rose-500" />
             <span>Video Opening</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => setActiveTab('security')}
+            className={`px-3.5 py-2 text-xs font-semibold rounded-xl transition-all cursor-pointer flex items-center gap-1.5 ${
+              activeTab === 'security'
+                ? 'glass-button bg-white text-indigo-900 shadow-sm font-bold border-white'
+                : 'text-slate-600 hover:text-slate-950 hover:bg-white/40'
+            }`}
+          >
+            <ShieldCheck className="w-3.5 h-3.5 text-indigo-600" />
+            <span>Akun & Keamanan</span>
           </button>
         </div>
       </div>
@@ -1072,8 +1150,8 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                   ) : (
                     /* Built-in Motion Graphic Preview Placeholder */
                     <div className="text-center p-8 space-y-4">
-                      <div className="w-16 h-16 rounded-3xl bg-slate-900 border-2 border-sky-400/80 mx-auto flex items-center justify-center text-sky-400 shadow-xl animate-pulse">
-                        <Sparkles className="w-8 h-8" />
+                      <div className="w-16 h-16 rounded-3xl bg-slate-900 border-2 border-amber-400/80 mx-auto flex items-center justify-center text-amber-400 shadow-xl animate-pulse">
+                        <GarudaIcon className="w-8 h-8" />
                       </div>
                       <div className="space-y-1">
                         <p className="text-xs font-extrabold uppercase tracking-widest text-sky-400">
@@ -1096,6 +1174,277 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                     </div>
                   )}
                 </div>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
+      {/* TAB 6: AKUN & KEAMANAN SISTEM (ADMIN & PANITIA) */}
+      {activeTab === 'security' && (() => {
+        const accounts = electionStore.getAccounts();
+        const adminAccount = accounts.find((a) => a.role === 'admin') || accounts[0];
+        const panitiaAccount = accounts.find((a) => a.role === 'panitia') || accounts[1];
+        const securityLogs = auditLogs.filter(
+          (l) =>
+            l.action.includes('LOGIN') ||
+            l.action.includes('LOGOUT') ||
+            l.action.includes('PASSWORD') ||
+            l.action.includes('ACCOUNT') ||
+            l.userRole === 'Admin Sekolah' ||
+            l.userRole === 'Panitia'
+        ).slice(0, 10);
+
+        return (
+          <div className="space-y-6 animate-in fade-in">
+            {/* Header Card */}
+            <div className="p-6 rounded-3xl glass-panel shadow-sm border border-white/80 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+              <div className="flex items-center gap-3">
+                <div className="w-12 h-12 rounded-2xl bg-indigo-100 text-indigo-900 flex items-center justify-center font-black">
+                  <ShieldCheck className="w-6 h-6" />
+                </div>
+                <div>
+                  <h3 className="text-base font-extrabold text-slate-900 tracking-tight">
+                    Pengaturan Akun Akses & Keamanan Sistem
+                  </h3>
+                  <p className="text-xs text-slate-500">
+                    Kelola kata sandi akun Administrator dan Panitia Pemilihan secara terpusat & real-time.
+                  </p>
+                </div>
+              </div>
+
+              <button
+                type="button"
+                onClick={handleResetCredentialsDefault}
+                className="px-3.5 py-2 text-xs font-bold text-slate-700 bg-white/80 hover:bg-white rounded-xl border border-slate-300/80 shadow-2xs hover:shadow-xs transition-all flex items-center gap-1.5 cursor-pointer self-start sm:self-auto"
+              >
+                <RotateCcw className="w-3.5 h-3.5 text-slate-500" />
+                <span>Reset ke Akun Bawaan</span>
+              </button>
+            </div>
+
+            {/* Two Account Management Cards */}
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+              {/* Administrator Account */}
+              <div className="p-6 rounded-3xl glass-panel shadow-sm border border-white/80 space-y-4">
+                <div className="flex items-center justify-between pb-3 border-b border-slate-200/60">
+                  <div className="flex items-center gap-2.5">
+                    <div className="w-9 h-9 rounded-xl bg-indigo-900 text-amber-300 flex items-center justify-center font-bold">
+                      <ShieldCheck className="w-5 h-5" />
+                    </div>
+                    <div>
+                      <h4 className="text-sm font-extrabold text-slate-900">Akun Administrator Sekolah</h4>
+                      <span className="text-[10px] text-slate-500 font-medium">Hak Akses Tertinggi & Manajemen Sistem</span>
+                    </div>
+                  </div>
+                  <span className="px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-indigo-100 text-indigo-800 uppercase tracking-wider">
+                    Role: Admin
+                  </span>
+                </div>
+
+                <div className="p-3.5 rounded-2xl bg-slate-50/80 border border-slate-200/80 space-y-2 text-xs">
+                  <div className="flex items-center justify-between">
+                    <span className="text-slate-500">Nama Pengguna (Username):</span>
+                    <span className="font-mono font-bold text-slate-900 px-2 py-0.5 bg-white rounded-lg border border-slate-200">
+                      {adminAccount?.username || 'admin'}
+                    </span>
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <span className="text-slate-500">Nama Lengkap Petugas:</span>
+                    <span className="font-semibold text-slate-800">{adminAccount?.name || 'Administrator Sekolah'}</span>
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <span className="text-slate-500">Login Terakhir:</span>
+                    <span className="text-slate-600 font-mono text-[11px]">
+                      {adminAccount?.lastLoginAt ? new Date(adminAccount.lastLoginAt).toLocaleString('id-ID') : 'Sesi aktif saat ini'}
+                    </span>
+                  </div>
+                </div>
+
+                <form onSubmit={handleUpdateAdminPassword} className="space-y-3 pt-2">
+                  <h5 className="text-xs font-bold text-slate-800 flex items-center gap-1.5">
+                    <KeyRound className="w-3.5 h-3.5 text-indigo-600" />
+                    <span>Ubah Kata Sandi Administrator</span>
+                  </h5>
+
+                  <div>
+                    <label className="block text-[11px] font-semibold text-slate-600 mb-1">
+                      Kata Sandi Baru (Min. 4 Karakter)
+                    </label>
+                    <div className="relative">
+                      <input
+                        type={showAdminPass ? 'text' : 'password'}
+                        value={adminNewPass}
+                        onChange={(e) => setAdminNewPass(e.target.value)}
+                        placeholder="Masukkan kata sandi baru..."
+                        required
+                        className="w-full px-3.5 py-2 pr-10 text-xs rounded-xl glass-input text-slate-900 focus:outline-none"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => setShowAdminPass(!showAdminPass)}
+                        className="absolute inset-y-0 right-0 pr-3 flex items-center text-slate-400 hover:text-slate-600 cursor-pointer"
+                      >
+                        {showAdminPass ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+                      </button>
+                    </div>
+                  </div>
+
+                  <div>
+                    <label className="block text-[11px] font-semibold text-slate-600 mb-1">
+                      Konfirmasi Kata Sandi Baru
+                    </label>
+                    <input
+                      type={showAdminPass ? 'text' : 'password'}
+                      value={adminConfirmPass}
+                      onChange={(e) => setAdminConfirmPass(e.target.value)}
+                      placeholder="Ketik ulang kata sandi baru..."
+                      required
+                      className="w-full px-3.5 py-2 text-xs rounded-xl glass-input text-slate-900 focus:outline-none"
+                    />
+                  </div>
+
+                  <button
+                    type="submit"
+                    className="w-full py-2.5 px-4 rounded-xl bg-indigo-900 hover:bg-indigo-950 text-white font-bold text-xs shadow-md transition-all cursor-pointer flex items-center justify-center gap-1.5"
+                  >
+                    <Save className="w-3.5 h-3.5" />
+                    <span>Simpan Kata Sandi Administrator</span>
+                  </button>
+                </form>
+              </div>
+
+              {/* Panitia Pemilihan Account */}
+              <div className="p-6 rounded-3xl glass-panel shadow-sm border border-white/80 space-y-4">
+                <div className="flex items-center justify-between pb-3 border-b border-slate-200/60">
+                  <div className="flex items-center gap-2.5">
+                    <div className="w-9 h-9 rounded-xl bg-sky-600 text-white flex items-center justify-center font-bold">
+                      <UserCheck className="w-5 h-5" />
+                    </div>
+                    <div>
+                      <h4 className="text-sm font-extrabold text-slate-900">Akun Panitia Pemilihan OSIS</h4>
+                      <span className="text-[10px] text-slate-500 font-medium">Manajemen Paslon, DPT & Cetak Berkas</span>
+                    </div>
+                  </div>
+                  <span className="px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-sky-100 text-sky-800 uppercase tracking-wider">
+                    Role: Panitia
+                  </span>
+                </div>
+
+                <div className="p-3.5 rounded-2xl bg-slate-50/80 border border-slate-200/80 space-y-2 text-xs">
+                  <div className="flex items-center justify-between">
+                    <span className="text-slate-500">Nama Pengguna (Username):</span>
+                    <span className="font-mono font-bold text-slate-900 px-2 py-0.5 bg-white rounded-lg border border-slate-200">
+                      {panitiaAccount?.username || 'panitia'}
+                    </span>
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <span className="text-slate-500">Nama Lengkap Petugas:</span>
+                    <span className="font-semibold text-slate-800">{panitiaAccount?.name || 'Panitia Pemilihan OSIS'}</span>
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <span className="text-slate-500">Login Terakhir:</span>
+                    <span className="text-slate-600 font-mono text-[11px]">
+                      {panitiaAccount?.lastLoginAt ? new Date(panitiaAccount.lastLoginAt).toLocaleString('id-ID') : 'Belum tercatat'}
+                    </span>
+                  </div>
+                </div>
+
+                <form onSubmit={handleUpdatePanitiaPassword} className="space-y-3 pt-2">
+                  <h5 className="text-xs font-bold text-slate-800 flex items-center gap-1.5">
+                    <KeyRound className="w-3.5 h-3.5 text-sky-600" />
+                    <span>Ubah Kata Sandi Panitia</span>
+                  </h5>
+
+                  <div>
+                    <label className="block text-[11px] font-semibold text-slate-600 mb-1">
+                      Kata Sandi Baru (Min. 4 Karakter)
+                    </label>
+                    <div className="relative">
+                      <input
+                        type={showPanitiaPass ? 'text' : 'password'}
+                        value={panitiaNewPass}
+                        onChange={(e) => setPanitiaNewPass(e.target.value)}
+                        placeholder="Masukkan kata sandi baru..."
+                        required
+                        className="w-full px-3.5 py-2 pr-10 text-xs rounded-xl glass-input text-slate-900 focus:outline-none"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => setShowPanitiaPass(!showPanitiaPass)}
+                        className="absolute inset-y-0 right-0 pr-3 flex items-center text-slate-400 hover:text-slate-600 cursor-pointer"
+                      >
+                        {showPanitiaPass ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+                      </button>
+                    </div>
+                  </div>
+
+                  <div>
+                    <label className="block text-[11px] font-semibold text-slate-600 mb-1">
+                      Konfirmasi Kata Sandi Baru
+                    </label>
+                    <input
+                      type={showPanitiaPass ? 'text' : 'password'}
+                      value={panitiaConfirmPass}
+                      onChange={(e) => setPanitiaConfirmPass(e.target.value)}
+                      placeholder="Ketik ulang kata sandi baru..."
+                      required
+                      className="w-full px-3.5 py-2 text-xs rounded-xl glass-input text-slate-900 focus:outline-none"
+                    />
+                  </div>
+
+                  <button
+                    type="submit"
+                    className="w-full py-2.5 px-4 rounded-xl bg-sky-600 hover:bg-sky-700 text-white font-bold text-xs shadow-md transition-all cursor-pointer flex items-center justify-center gap-1.5"
+                  >
+                    <Save className="w-3.5 h-3.5" />
+                    <span>Simpan Kata Sandi Panitia</span>
+                  </button>
+                </form>
+              </div>
+            </div>
+
+            {/* Audit Trail Section for Security Events */}
+            <div className="p-6 rounded-3xl glass-panel shadow-sm border border-white/80 space-y-4">
+              <div className="flex items-center justify-between pb-3 border-b border-slate-200/60">
+                <div className="flex items-center gap-2">
+                  <Clock className="w-4 h-4 text-indigo-600" />
+                  <h4 className="text-xs font-black uppercase tracking-wider text-slate-800">
+                    Aktivitas Masuk & Keamanan Akun Terakhir
+                  </h4>
+                </div>
+                <span className="text-[11px] text-slate-500 font-mono">Tersinkronisasi Real-Time</span>
+              </div>
+
+              <div className="divide-y divide-slate-100 overflow-hidden rounded-2xl border border-slate-200/60 bg-white/70">
+                {securityLogs.length === 0 ? (
+                  <div className="p-4 text-center text-xs text-slate-400">Belum ada riwayat aktivitas keamanan.</div>
+                ) : (
+                  securityLogs.map((log) => (
+                    <div key={log.id} className="p-3.5 text-xs flex flex-col sm:flex-row sm:items-center justify-between gap-2 hover:bg-slate-50/50 transition-colors">
+                      <div className="flex items-start gap-2.5">
+                        <span className={`px-2 py-0.5 rounded-lg text-[10px] font-extrabold uppercase shrink-0 mt-0.5 ${
+                          log.action.includes('FAILED')
+                            ? 'bg-rose-100 text-rose-800 border border-rose-200'
+                            : log.action.includes('PASSWORD')
+                            ? 'bg-amber-100 text-amber-900 border border-amber-200'
+                            : 'bg-emerald-100 text-emerald-800 border border-emerald-200'
+                        }`}>
+                          {log.action}
+                        </span>
+                        <div>
+                          <p className="font-semibold text-slate-900">{log.details}</p>
+                          <span className="text-[10px] text-slate-500 font-medium">
+                            Pengguna: <strong className="text-slate-700">{log.userId}</strong> ({log.userRole}) · IP: {log.ipAddress}
+                          </span>
+                        </div>
+                      </div>
+                      <span className="text-[11px] font-mono text-slate-500 shrink-0 self-end sm:self-center">
+                        {new Date(log.timestamp).toLocaleString('id-ID')}
+                      </span>
+                    </div>
+                  ))
+                )}
               </div>
             </div>
           </div>

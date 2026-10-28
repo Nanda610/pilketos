@@ -7,13 +7,13 @@
  * Printable Token Cards, and Real-time Booth Monitoring.
  */
 
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import * as XLSX from 'xlsx';
 import { 
   FileSpreadsheet, Users, UserPlus, KeyRound, Printer, Upload, Download, Search,
   Filter, CheckCircle2, Clock, Trash2, Edit, RefreshCw, X, Plus,
   ShieldCheck, AlertTriangle, Video, Play, FileVideo, Camera, Image as ImageIcon,
-  Film, Sparkles, FileText
+  Film, FileText
 } from 'lucide-react';
 import { SchoolConfig, ElectionPeriod, Candidate, Voter } from '../types';
 import { electionStore } from '../lib/store';
@@ -21,6 +21,7 @@ import { CandidateAvatar, SchoolCrestLogo } from './CandidateAvatar';
 import { PrintTokenCards } from './PrintTokenCards';
 import { OpeningSequence } from './OpeningSequence';
 import { PrintSkPanitia } from './PrintSkPanitia';
+import { GarudaIcon } from './GarudaIcon';
 
 interface PanitiaDashboardProps {
   school: SchoolConfig;
@@ -44,6 +45,15 @@ export const PanitiaDashboard: React.FC<PanitiaDashboardProps> = ({ school, peri
   const [customVideoUrlInput, setCustomVideoUrlInput] = useState(school.openingVideoUrl || '');
   const [csvRawText, setCsvRawText] = useState('');
   const [alertNotice, setAlertNotice] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
+
+  // Subscribe to real-time store changes from Admin or other devices
+  const [, setStoreVersion] = useState(0);
+  useEffect(() => {
+    const unsub = electionStore.subscribe(() => {
+      setStoreVersion((v) => v + 1);
+    });
+    return () => unsub();
+  }, []);
 
   // Form states for Single Voter Add
   const [newVoter, setNewVoter] = useState({
@@ -1066,7 +1076,7 @@ export const PanitiaDashboard: React.FC<PanitiaDashboardProps> = ({ school, peri
 
                 <div className="mt-3 space-y-2">
                   <h3 className="text-sm font-bold text-slate-900 flex items-center gap-2">
-                    <Sparkles className="w-4 h-4 text-amber-500" />
+                    <GarudaIcon className="w-4 h-4 text-amber-500" />
                     <span>Animasi Digital Siaran TV (Motion Graphic)</span>
                   </h3>
                   <p className="text-xs text-slate-600 leading-relaxed">

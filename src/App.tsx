@@ -15,6 +15,9 @@ import { PanitiaDashboard } from './components/PanitiaDashboard';
 import { AdminDashboard } from './components/AdminDashboard';
 import { PRDDocument } from './components/PRDDocument';
 import { OpeningSequence } from './components/OpeningSequence';
+import { AuthLoginModal } from './components/AuthLoginModal';
+import { AuthSession, UserRole } from './types';
+import { Lock, ShieldAlert, ArrowLeft, KeyRound } from 'lucide-react';
 
 export default function App() {
   const [currentView, setCurrentView] = useState<AppView>(() => {
@@ -33,6 +36,11 @@ export default function App() {
     }
     return 'PUBLIC';
   });
+
+  // Authentication session state
+  const [activeSession, setActiveSession] = useState<AuthSession | null>(() => electionStore.getActiveSession());
+  const [loginModalOpen, setLoginModalOpen] = useState<boolean>(false);
+  const [loginTargetRole, setLoginTargetRole] = useState<UserRole | null>(null);
 
   // Opening video plays before entering the application (skippable via ?autostart=1)
   const [showOpeningVideo, setShowOpeningVideo] = useState<boolean>(() => {
@@ -54,6 +62,20 @@ export default function App() {
   const [summary, setSummary] = useState<ElectionSummary>(() => electionStore.getSummary());
   const [syncMeta, setSyncMeta] = useState<RealtimeSyncMetadata>(() => electionStore.getSyncMetadata());
   const [appTimeMs, setAppTimeMs] = useState<number>(() => electionStore.getAppTimeMs());
+
+  // Enforce auth check on initial view if accessed via direct URL
+  useEffect(() => {
+    const session = electionStore.getActiveSession();
+    setActiveSession(session);
+
+    if (currentView === 'PANITIA' && !session) {
+      setLoginTargetRole('panitia');
+      setLoginModalOpen(true);
+    } else if (currentView === 'ADMIN' && (!session || session.role !== 'admin')) {
+      setLoginTargetRole('admin');
+      setLoginModalOpen(true);
+    }
+  }, []);
 
   useEffect(() => {
     // Subscribe to real-time store updates (local & remote WebSocket/BroadcastChannel/HTTP)
@@ -79,6 +101,50 @@ export default function App() {
       clearInterval(clockTimer);
     };
   }, []);
+
+  const handleSelectView = (view: AppView) => {
+    if (view === 'PANITIA') {
+      if (!activeSession) {
+        setLoginTargetRole('panitia');
+        setLoginModalOpen(true);
+        return;
+      }
+    } else if (view === 'ADMIN') {
+      if (!activeSession || activeSession.role !== 'admin') {
+        setLoginTargetRole('admin');
+        setLoginModalOpen(true);
+        return;
+      }
+    }
+    setCurrentView(view);
+  };
+
+  const handleLoginSuccess = (session: AuthSession) => {
+    setActiveSession(session);
+    setLoginModalOpen(false);
+    if (loginTargetRole === 'admin') {
+      setCurrentView('ADMIN');
+    } else if (loginTargetRole === 'panitia') {
+      setCurrentView('PANITIA');
+    }
+  };
+
+  const handleLoginClose = () => {
+    setLoginModalOpen(false);
+    if (currentView === 'PANITIA' && !activeSession) {
+      setCurrentView('PUBLIC');
+    } else if (currentView === 'ADMIN' && (!activeSession || activeSession.role !== 'admin')) {
+      setCurrentView('PUBLIC');
+    }
+  };
+
+  const handleLogout = () => {
+    electionStore.logout();
+    setActiveSession(null);
+    if (currentView === 'PANITIA' || currentView === 'ADMIN') {
+      setCurrentView('PUBLIC');
+    }
+  };
 
   return (
     <div className="min-h-screen bg-slate-100/90 text-slate-900 flex flex-col font-sans relative overflow-x-hidden selection:bg-sky-500 selection:text-white">
@@ -112,9 +178,24 @@ export default function App() {
       <Navbar
         school={school}
         currentView={currentView}
-        onSelectView={setCurrentView}
+        onSelectView={handleSelectView}
         appTimeMs={appTimeMs}
         syncMeta={syncMeta}
+        activeSession={activeSession}
+        onOpenLoginModal={(role) => {
+          setLoginTargetRole(role || 'panitia');
+          setLoginModalOpen(true);
+        }}
+        onLogout={handleLogout}
+      />
+
+      {/* Authentication Login Modal */}
+      <AuthLoginModal
+        isOpen={loginModalOpen}
+        targetRole={loginTargetRole}
+        school={school}
+        onSuccess={handleLoginSuccess}
+        onClose={handleLoginClose}
       />
 
       {/* Main Content Area */}
@@ -139,22 +220,88 @@ export default function App() {
         )}
 
         {currentView === 'PANITIA' && (
-          <PanitiaDashboard
-            school={school}
-            period={activePeriod}
-          />
+          activeSession ? (
+            <PanitiaDashboard
+              school={school}
+              period={activePeriod}
+            />
+          ) : (
+            <div className="max-w-md mx-auto my-12 p-8 bg-white/90 backdrop-blur-xl rounded-3xl shadow-xl border border-white/60 text-center space-y-4">
+              <div className="w-16 h-16 mx-auto rounded-2xl bg-sky-100 text-sky-700 flex items-center justify-center">
+                <Lock className="w-8 h-8" />
+              </div>
+              <h3 className="text-xl font-extrabold text-slate-900">Akses Dibatasi untuk Panitia</h3>
+              <p className="text-xs text-slate-600 leading-relaxed">
+                Portal Panitia Pemilihan OSIS memerlukan autentikasi masuk terlebih dahulu.
+              </p>
+              <div className="pt-2 flex flex-col gap-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setLoginTargetRole('panitia');
+                    setLoginModalOpen(true);
+                  }}
+                  className="w-full py-2.5 px-4 bg-sky-600 hover:bg-sky-700 text-white font-bold rounded-xl text-xs shadow-md transition-all cursor-pointer flex items-center justify-center gap-2"
+                >
+                  <KeyRound className="w-4 h-4" />
+                  <span>Login Sebagai Panitia</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setCurrentView('PUBLIC')}
+                  className="w-full py-2 px-4 text-xs font-semibold text-slate-600 hover:text-slate-900 cursor-pointer"
+                >
+                  Kembali ke Hitung Cepat
+                </button>
+              </div>
+            </div>
+          )
         )}
 
         {currentView === 'ADMIN' && (
-          <AdminDashboard
-            school={school}
-            periods={periods}
-            committee={committee}
-            auditLogs={auditLogs}
-            summary={summary}
-            appTimeMs={appTimeMs}
-            syncMeta={syncMeta}
-          />
+          activeSession && activeSession.role === 'admin' ? (
+            <AdminDashboard
+              school={school}
+              periods={periods}
+              committee={committee}
+              auditLogs={auditLogs}
+              summary={summary}
+              appTimeMs={appTimeMs}
+              syncMeta={syncMeta}
+            />
+          ) : (
+            <div className="max-w-md mx-auto my-12 p-8 bg-white/90 backdrop-blur-xl rounded-3xl shadow-xl border border-white/60 text-center space-y-4">
+              <div className="w-16 h-16 mx-auto rounded-2xl bg-indigo-100 text-indigo-900 flex items-center justify-center">
+                <ShieldAlert className="w-8 h-8" />
+              </div>
+              <h3 className="text-xl font-extrabold text-slate-900">Akses Khusus Administrator</h3>
+              <p className="text-xs text-slate-600 leading-relaxed">
+                {activeSession 
+                  ? `Anda saat ini masuk sebagai "${activeSession.name}" (${activeSession.role}). Masuk sebagai Administrator Sekolah untuk membuka panel ini.`
+                  : 'Panel Administrasi Sekolah dilindungi kata sandi dan hak akses Administrator.'}
+              </p>
+              <div className="pt-2 flex flex-col gap-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setLoginTargetRole('admin');
+                    setLoginModalOpen(true);
+                  }}
+                  className="w-full py-2.5 px-4 bg-indigo-900 hover:bg-indigo-950 text-white font-bold rounded-xl text-xs shadow-md transition-all cursor-pointer flex items-center justify-center gap-2"
+                >
+                  <KeyRound className="w-4 h-4" />
+                  <span>Login Sebagai Administrator</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setCurrentView('PUBLIC')}
+                  className="w-full py-2 px-4 text-xs font-semibold text-slate-600 hover:text-slate-900 cursor-pointer"
+                >
+                  Kembali ke Hitung Cepat
+                </button>
+              </div>
+            </div>
+          )
         )}
 
         {currentView === 'PRD' && (

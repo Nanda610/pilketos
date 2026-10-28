@@ -21,6 +21,7 @@ import {
   INITIAL_VOTES,
   INITIAL_COMMITTEE,
   INITIAL_AUDIT_LOGS,
+  INITIAL_ACCOUNTS,
 } from './src/lib/initialData';
 import { ElectionStateSnapshot } from './src/types';
 
@@ -42,6 +43,7 @@ function createInitialSnapshot(): ElectionStateSnapshot {
     votes: INITIAL_VOTES,
     committee: INITIAL_COMMITTEE,
     auditLogs: INITIAL_AUDIT_LOGS,
+    accounts: INITIAL_ACCOUNTS,
   };
 }
 
@@ -64,6 +66,7 @@ function loadStateFromDisk(): ElectionStateSnapshot {
           votes: Array.isArray(parsed.votes) ? parsed.votes : INITIAL_VOTES,
           committee: Array.isArray(parsed.committee) ? parsed.committee : INITIAL_COMMITTEE,
           auditLogs: Array.isArray(parsed.auditLogs) ? parsed.auditLogs : INITIAL_AUDIT_LOGS,
+          accounts: Array.isArray(parsed.accounts) ? parsed.accounts : INITIAL_ACCOUNTS,
         };
       }
     }
@@ -90,6 +93,21 @@ async function startServer() {
   const app = express();
   const httpServer = createServer(app);
 
+  // CORS & No-Cache middleware to prevent stale responses across proxies, Cloud Run, and multi-browser clients
+  app.use((req, res, next) => {
+    res.header('Access-Control-Allow-Origin', '*');
+    res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+    res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With');
+    res.header('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+    res.header('Pragma', 'no-cache');
+    res.header('Expires', '0');
+    if (req.method === 'OPTIONS') {
+      res.sendStatus(204);
+      return;
+    }
+    next();
+  });
+
   // Support large payloads for custom school logos, candidate photos, and video data URLs
   app.use(express.json({ limit: '60mb' }));
 
@@ -113,7 +131,11 @@ async function startServer() {
     });
     clients.forEach((client) => {
       if (client !== excludeSocket && client.readyState === WebSocket.OPEN) {
-        client.send(message);
+        try {
+          client.send(message);
+        } catch {
+          clients.delete(client);
+        }
       }
     });
   };
@@ -130,11 +152,17 @@ async function startServer() {
 
     const appNowIso = new Date(Date.now() + nextOffset).toISOString();
 
+    const nextRevision =
+      Math.max(
+        authoritativeState.revision,
+        typeof incoming.revision === 'number' ? incoming.revision : 0
+      ) + 1;
+
     authoritativeState = {
-      revision: authoritativeState.revision + 1,
+      revision: nextRevision,
       updatedAt: appNowIso,
-      updatedBy: incoming.updatedBy || updatedBy,
-      lastAction: incoming.lastAction || lastAction,
+      updatedBy: updatedBy || incoming.updatedBy || 'Admin Sekolah',
+      lastAction: lastAction || incoming.lastAction || 'SYNC_UPDATE',
       appTimeOffsetMs: nextOffset,
       school: incoming.school ?? authoritativeState.school,
       periods: incoming.periods ?? authoritativeState.periods,
@@ -143,6 +171,7 @@ async function startServer() {
       votes: incoming.votes ?? authoritativeState.votes,
       committee: incoming.committee ?? authoritativeState.committee,
       auditLogs: incoming.auditLogs ?? authoritativeState.auditLogs,
+      accounts: incoming.accounts ?? authoritativeState.accounts ?? INITIAL_ACCOUNTS,
     };
 
     saveStateToDisk(authoritativeState);
@@ -255,25 +284,65 @@ async function startServer() {
       });
     });
 
+    (ws as unknown as { isAlive: boolean }).isAlive = true;
+    ws.on('pong', () => {
+      (ws as unknown as { isAlive: boolean }).isAlive = true;
+    });
+
     ws.on('error', () => {
       clients.delete(ws);
     });
   });
 
-  // Authoritative Time & Revision Heartbeat every 4 seconds so all clients stay locked to the exact same clock
+  // Keepalive ping every 15s to keep connections alive through Cloud Run / proxy firewalls
+  const keepAliveInterval = setInterval(() => {
+    wss.clients.forEach((ws) => {
+      const clientSock = ws as unknown as { isAlive: boolean };
+      if (clientSock.isAlive === false) {
+        clients.delete(ws);
+        return ws.terminate();
+      }
+      clientSock.isAlive = false;
+      try {
+        ws.ping();
+      } catch {
+        clients.delete(ws);
+      }
+    });
+  }, 15000);
+
+  // Authoritative Time & Revision Heartbeat every 3 seconds so all clients stay locked to the exact same clock and revision
   const heartbeatInterval = setInterval(() => {
     if (clients.size > 0) {
       broadcastToAll({
         type: 'TIME_HEARTBEAT',
         appTimeOffsetMs: authoritativeState.appTimeOffsetMs,
         revision: authoritativeState.revision,
+        serverTimeMs: Date.now(),
+        updatedAt: authoritativeState.updatedAt,
+        lastAction: authoritativeState.lastAction,
       });
     }
-  }, 4000);
+  }, 3000);
 
-  httpServer.on('close', () => clearInterval(heartbeatInterval));
+  httpServer.on('close', () => {
+    clearInterval(heartbeatInterval);
+    clearInterval(keepAliveInterval);
+  });
 
   // --- REST API ENDPOINTS (For HTTP sync & fallback polling) ---
+  app.get('/api/revision', (_req, res) => {
+    res.json({
+      revision: authoritativeState.revision,
+      updatedAt: authoritativeState.updatedAt,
+      updatedBy: authoritativeState.updatedBy,
+      lastAction: authoritativeState.lastAction,
+      appTimeOffsetMs: authoritativeState.appTimeOffsetMs,
+      serverTimeMs: Date.now(),
+      onlineClients: getOnlineCount(),
+    });
+  });
+
   app.get('/api/state', (_req, res) => {
     res.json({
       state: authoritativeState,

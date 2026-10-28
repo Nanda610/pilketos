@@ -18,6 +18,9 @@ import {
   ElectionSummary,
   ElectionStateSnapshot,
   RealtimeSyncMetadata,
+  UserAccount,
+  AuthSession,
+  UserRole,
 } from '../types';
 import {
   INITIAL_SCHOOL,
@@ -27,6 +30,7 @@ import {
   INITIAL_VOTES,
   INITIAL_COMMITTEE,
   INITIAL_AUDIT_LOGS,
+  INITIAL_ACCOUNTS,
 } from './initialData';
 import { generateRandomPin, hashPin, verifyPin, validateNisn, validatePin } from './security';
 import {
@@ -47,6 +51,8 @@ export class ElectionStore {
   private votes: AnonymousVote[];
   private committee: CommitteeMember[];
   private auditLogs: AuditLog[];
+  private accounts: UserAccount[];
+  private activeSession: AuthSession | null = null;
   private listeners: Set<() => void> = new Set();
 
   // Real-time synchronization & Unified Application Clock state
@@ -76,6 +82,7 @@ export class ElectionStore {
     this.votes = INITIAL_VOTES;
     this.committee = INITIAL_COMMITTEE;
     this.auditLogs = INITIAL_AUDIT_LOGS;
+    this.accounts = INITIAL_ACCOUNTS;
 
     this.loadFromStorage();
     this.initRealtimeSync();
@@ -137,6 +144,7 @@ export class ElectionStore {
       votes: this.votes,
       committee: this.committee,
       auditLogs: this.auditLogs,
+      accounts: this.accounts,
     };
   }
 
@@ -185,6 +193,7 @@ export class ElectionStore {
       if (Array.isArray(snapshot.votes)) this.votes = snapshot.votes;
       if (Array.isArray(snapshot.committee)) this.committee = snapshot.committee;
       if (Array.isArray(snapshot.auditLogs)) this.auditLogs = snapshot.auditLogs;
+      if (Array.isArray(snapshot.accounts)) this.accounts = snapshot.accounts;
 
       this.lastSyncedAt = new Date(this.getAppTimeMs()).toISOString();
       this.saveToStorage();
@@ -314,18 +323,48 @@ export class ElectionStore {
     this.fetchStateFromHttp(true);
     this.connectWebSocket();
 
-    // 4. Periodic HTTP fallback poll & NTP clock sync check
+    // 4. Ultra-responsive Dual-Engine Synchronization Loop (every 1.2s)
+    // - Keeps WebSocket alive with PING/PONG and latency calculation
+    // - Concurrently checks /api/revision (150-byte payload) as an indestructible safety net
     this.pollTimer = setInterval(() => {
       if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-        this.ws.send(JSON.stringify({ type: 'PING', clientSentAtMs: Date.now() }));
-      } else {
-        this.fetchStateFromHttp(false);
+        try {
+          this.ws.send(JSON.stringify({ type: 'PING', clientSentAtMs: Date.now() }));
+        } catch {
+          this.connectWebSocket();
+        }
+      } else if (!this.ws || this.ws.readyState === WebSocket.CLOSED) {
+        this.connectWebSocket();
       }
-    }, 3000);
+      this.checkRevisionAndSync();
+    }, 1200);
+
+    // 5. Instantly re-verify and sync when browser tab regains focus or device wakes from sleep
+    const onWakeOrFocus = () => {
+      this.checkRevisionAndSync();
+      if (!this.ws || this.ws.readyState === WebSocket.CLOSED) {
+        this.connectWebSocket();
+      }
+    };
+    window.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible') onWakeOrFocus();
+    });
+    window.addEventListener('online', onWakeOrFocus);
+    window.addEventListener('focus', onWakeOrFocus);
   }
 
   private connectWebSocket() {
     if (typeof window === 'undefined' || typeof WebSocket === 'undefined') return;
+    if (this.ws && (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING)) {
+      return;
+    }
+    if (this.ws) {
+      try {
+        this.ws.close();
+      } catch {}
+      this.ws = null;
+    }
+
     try {
       const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
       const wsUrl = `${protocol}//${window.location.host}/ws`;
@@ -402,14 +441,49 @@ export class ElectionStore {
       socket.onclose = () => {
         this.ws = null;
         if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
-        this.reconnectTimer = setTimeout(() => this.connectWebSocket(), 2500);
+        this.reconnectTimer = setTimeout(() => this.connectWebSocket(), 2000);
       };
 
       socket.onerror = () => {
-        socket.close();
+        try {
+          socket.close();
+        } catch {}
       };
     } catch {
       // Fallback to HTTP polling / BroadcastChannel
+    }
+  }
+
+  private async checkRevisionAndSync() {
+    if (typeof window === 'undefined' || typeof fetch === 'undefined') return;
+    try {
+      const res = await fetch('/api/revision', { cache: 'no-store' });
+      if (!res.ok) {
+        await this.fetchStateFromHttp(false);
+        return;
+      }
+      const data = await res.json();
+      if (typeof data.serverTimeMs === 'number') {
+        this.serverClockOffsetMs = calculateServerClockOffset(data.serverTimeMs, Date.now());
+      }
+      if (typeof data.onlineClients === 'number') {
+        this.onlineClients = data.onlineClients;
+      }
+      if (typeof data.appTimeOffsetMs === 'number' && data.appTimeOffsetMs !== this.appTimeOffsetMs) {
+        this.appTimeOffsetMs = data.appTimeOffsetMs;
+      }
+      if (typeof data.revision === 'number' && data.revision > this.revision) {
+        // Server has a newer revision than us, immediately fetch full authoritative snapshot!
+        await this.fetchStateFromHttp(true);
+      } else {
+        this.isConnected = true;
+        this.lastSyncedAt = new Date(this.getAppTimeMs()).toISOString();
+        this.emitToListeners();
+      }
+    } catch {
+      if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+        this.transport = typeof BroadcastChannel !== 'undefined' ? 'broadcast' : 'connecting';
+      }
     }
   }
 
@@ -460,6 +534,7 @@ export class ElectionStore {
     }
 
     // 2. Push to authoritative server over WebSocket or HTTP POST
+    let wsSent = false;
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
       try {
         this.ws.send(
@@ -471,12 +546,27 @@ export class ElectionStore {
             senderId: this.clientId,
           })
         );
-        return;
+        wsSent = true;
       } catch {
-        // Fall through to HTTP POST
+        wsSent = false;
       }
     }
 
+    if (!wsSent) {
+      this.postStateViaHttp(snapshot, updatedBy, lastAction);
+    } else {
+      // Safety timeout: if server WebSocket doesn't ACK the revision within 1500ms, push via HTTP
+      const expectedRevision = snapshot.revision;
+      setTimeout(() => {
+        if (this.revision <= expectedRevision) {
+          this.postStateViaHttp(snapshot, updatedBy, lastAction);
+        }
+      }, 1500);
+    }
+  }
+
+  private postStateViaHttp(snapshot: ElectionStateSnapshot, updatedBy: string, lastAction: string) {
+    if (typeof window === 'undefined' || typeof fetch === 'undefined') return;
     fetch('/api/state', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -515,6 +605,7 @@ export class ElectionStore {
       const savedVotes = localStorage.getItem(`${STORAGE_KEY_PREFIX}_votes`);
       const savedCommittee = localStorage.getItem(`${STORAGE_KEY_PREFIX}_committee`);
       const savedLogs = localStorage.getItem(`${STORAGE_KEY_PREFIX}_logs`);
+      const savedAccounts = localStorage.getItem(`${STORAGE_KEY_PREFIX}_accounts`);
       const savedMeta = localStorage.getItem(`${STORAGE_KEY_PREFIX}_meta`);
 
       if (savedSchool) this.school = JSON.parse(savedSchool);
@@ -524,11 +615,22 @@ export class ElectionStore {
       if (savedVotes) this.votes = JSON.parse(savedVotes);
       if (savedCommittee) this.committee = JSON.parse(savedCommittee);
       if (savedLogs) this.auditLogs = JSON.parse(savedLogs);
+      if (savedAccounts) this.accounts = JSON.parse(savedAccounts);
       if (savedMeta) {
         const meta = JSON.parse(savedMeta);
         if (typeof meta.revision === 'number') this.revision = meta.revision;
         if (typeof meta.appTimeOffsetMs === 'number') this.appTimeOffsetMs = meta.appTimeOffsetMs;
         if (meta.updatedAt) this.updatedAt = meta.updatedAt;
+      }
+
+      // Restore active session if present
+      const savedSession = sessionStorage.getItem(`${STORAGE_KEY_PREFIX}_session`) || localStorage.getItem(`${STORAGE_KEY_PREFIX}_session`);
+      if (savedSession) {
+        try {
+          this.activeSession = JSON.parse(savedSession);
+        } catch {
+          this.activeSession = null;
+        }
       }
     } catch {
       // Ignore parse errors and fallback to initial
@@ -545,6 +647,7 @@ export class ElectionStore {
       localStorage.setItem(`${STORAGE_KEY_PREFIX}_votes`, JSON.stringify(this.votes));
       localStorage.setItem(`${STORAGE_KEY_PREFIX}_committee`, JSON.stringify(this.committee));
       localStorage.setItem(`${STORAGE_KEY_PREFIX}_logs`, JSON.stringify(this.auditLogs));
+      localStorage.setItem(`${STORAGE_KEY_PREFIX}_accounts`, JSON.stringify(this.accounts));
       localStorage.setItem(
         `${STORAGE_KEY_PREFIX}_meta`,
         JSON.stringify({
@@ -570,8 +673,157 @@ export class ElectionStore {
     this.votes = INITIAL_VOTES;
     this.committee = INITIAL_COMMITTEE;
     this.auditLogs = INITIAL_AUDIT_LOGS;
+    this.accounts = INITIAL_ACCOUNTS;
     this.logAudit('Admin Sekolah', 'RESET_DATA_DEMO', 'Database disetel ulang ke dataset simulasi awal.', '127.0.0.1', 'WARNING');
     this.notify('Admin Sekolah', 'RESET_DATA_DEMO');
+  }
+
+  // --- AUTHENTICATION & ACCESS CONTROL (ADMIN & PANITIA) ---
+  public getAccounts(): UserAccount[] {
+    return [...this.accounts];
+  }
+
+  public getActiveSession(): AuthSession | null {
+    if (!this.activeSession && typeof window !== 'undefined') {
+      try {
+        const stored = sessionStorage.getItem(`${STORAGE_KEY_PREFIX}_session`) || localStorage.getItem(`${STORAGE_KEY_PREFIX}_session`);
+        if (stored) {
+          this.activeSession = JSON.parse(stored);
+        }
+      } catch {
+        this.activeSession = null;
+      }
+    }
+    return this.activeSession;
+  }
+
+  public login(username: string, password: string): { success: boolean; message: string; session?: AuthSession } {
+    const cleanUser = username.trim().toLowerCase();
+    const cleanPass = password.trim();
+
+    if (!cleanUser || !cleanPass) {
+      return { success: false, message: 'Nama pengguna dan kata sandi wajib diisi.' };
+    }
+
+    const account = this.accounts.find(
+      (acc) => acc.username.toLowerCase() === cleanUser
+    );
+
+    if (!account) {
+      this.logAudit('Sistem', 'LOGIN_FAILED', `Percobaan login gagal: pengguna "${cleanUser}" tidak ditemukan.`, '127.0.0.1', 'WARNING');
+      return { success: false, message: 'Nama pengguna atau kata sandi tidak cocok.' };
+    }
+
+    const isValid = account.passwordPlain === cleanPass || (account.passwordHash && verifyPin(cleanPass, account.passwordHash));
+
+    if (!isValid) {
+      this.logAudit(account.role === 'admin' ? 'Admin Sekolah' : 'Panitia', 'LOGIN_FAILED', `Percobaan login gagal untuk akun: "${account.username}".`, '127.0.0.1', 'WARNING');
+      return { success: false, message: 'Kata sandi yang Anda masukkan salah.' };
+    }
+
+    const session: AuthSession = {
+      id: account.id,
+      username: account.username,
+      name: account.name,
+      role: account.role,
+      token: `tok_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`,
+      loginTime: new Date(this.getAppTimeMs()).toISOString(),
+    };
+
+    this.activeSession = session;
+    if (typeof window !== 'undefined') {
+      try {
+        sessionStorage.setItem(`${STORAGE_KEY_PREFIX}_session`, JSON.stringify(session));
+        localStorage.setItem(`${STORAGE_KEY_PREFIX}_session`, JSON.stringify(session));
+      } catch {}
+    }
+
+    // Update lastLoginAt
+    this.accounts = this.accounts.map((acc) =>
+      acc.id === account.id ? { ...acc, lastLoginAt: session.loginTime } : acc
+    );
+
+    this.logAudit(
+      account.role === 'admin' ? 'Admin Sekolah' : 'Panitia',
+      'LOGIN_SUCCESS',
+      `Berhasil masuk sebagai ${account.role === 'admin' ? 'Administrator Sekolah' : 'Panitia Pemilihan'} (${account.name}).`,
+      '127.0.0.1',
+      'INFO'
+    );
+
+    this.notify(account.role === 'admin' ? 'Admin Sekolah' : 'Panitia', 'USER_LOGIN');
+    return { success: true, message: 'Login berhasil.', session };
+  }
+
+  public logout(): void {
+    const prev = this.activeSession;
+    this.activeSession = null;
+    if (typeof window !== 'undefined') {
+      try {
+        sessionStorage.removeItem(`${STORAGE_KEY_PREFIX}_session`);
+        localStorage.removeItem(`${STORAGE_KEY_PREFIX}_session`);
+      } catch {}
+    }
+    if (prev) {
+      this.logAudit(
+        prev.role === 'admin' ? 'Admin Sekolah' : 'Panitia',
+        'LOGOUT',
+        `Pengguna ${prev.name} (${prev.username}) telah keluar dari sistem.`,
+        '127.0.0.1',
+        'INFO'
+      );
+    }
+    this.emitToListeners();
+  }
+
+  public updateAccountPassword(
+    username: string,
+    newPasswordPlain: string,
+    actor: string = 'Admin Sekolah'
+  ): { success: boolean; message: string } {
+    if (!newPasswordPlain || newPasswordPlain.trim().length < 4) {
+      return { success: false, message: 'Kata sandi minimal terdiri dari 4 karakter.' };
+    }
+
+    const cleanUser = username.trim().toLowerCase();
+    const index = this.accounts.findIndex((acc) => acc.username.toLowerCase() === cleanUser);
+
+    if (index === -1) {
+      return { success: false, message: `Akun dengan username "${username}" tidak ditemukan.` };
+    }
+
+    const updatedAccount: UserAccount = {
+      ...this.accounts[index],
+      passwordPlain: newPasswordPlain.trim(),
+      updatedAt: new Date(this.getAppTimeMs()).toISOString(),
+    };
+
+    const nextAccounts = [...this.accounts];
+    nextAccounts[index] = updatedAccount;
+    this.accounts = nextAccounts;
+
+    this.logAudit(
+      'Admin Sekolah',
+      'UPDATE_PASSWORD',
+      `Kata sandi untuk akun ${updatedAccount.name} (${updatedAccount.username}) berhasil diperbarui oleh ${actor}.`,
+      '192.168.10.1',
+      'INFO'
+    );
+
+    this.notify(actor, 'UPDATE_PASSWORD');
+    return { success: true, message: 'Kata sandi berhasil diperbarui.' };
+  }
+
+  public resetAccountsToDefault(actor: string = 'Admin Sekolah'): void {
+    this.accounts = INITIAL_ACCOUNTS;
+    this.logAudit(
+      'Admin Sekolah',
+      'RESET_ACCOUNTS_DEFAULT',
+      `Akun dan kata sandi Administrator & Panitia dikembalikan ke setelan awal oleh ${actor}.`,
+      '192.168.10.1',
+      'WARNING'
+    );
+    this.notify(actor, 'RESET_ACCOUNTS_DEFAULT');
   }
 
   // --- SCHOOL CONFIGURATION ---
@@ -1167,8 +1419,8 @@ export class ElectionStore {
       .sort((a, b) => a.ballotNumber - b.ballotNumber);
 
     const totalVoters = votersInPeriod.length;
-    const totalVoted = votersInPeriod.filter((v) => v.hasVoted).length;
-    const totalUnvoted = totalVoters - totalVoted;
+    const totalVoted = Math.max(votersInPeriod.filter((v) => v.hasVoted).length, votesInPeriod.length);
+    const totalUnvoted = Math.max(0, totalVoters - totalVoted);
     const participationPercentage = totalVoters > 0 ? (totalVoted / totalVoters) * 100 : 0;
 
     // Count votes per candidate
