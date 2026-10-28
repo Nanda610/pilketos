@@ -16,6 +16,7 @@ import { AdminDashboard } from './components/AdminDashboard';
 import { PRDDocument } from './components/PRDDocument';
 import { OpeningSequence } from './components/OpeningSequence';
 import { AuthLoginModal } from './components/AuthLoginModal';
+import { ShareBloggerModal } from './components/ShareBloggerModal';
 import { AuthSession, UserRole } from './types';
 import { Lock, ShieldAlert, ArrowLeft, KeyRound } from 'lucide-react';
 
@@ -41,6 +42,9 @@ export default function App() {
   const [activeSession, setActiveSession] = useState<AuthSession | null>(() => electionStore.getActiveSession());
   const [loginModalOpen, setLoginModalOpen] = useState<boolean>(false);
   const [loginTargetRole, setLoginTargetRole] = useState<UserRole | null>(null);
+
+  // Share to Blogger modal state
+  const [shareBloggerOpen, setShareBloggerOpen] = useState<boolean>(false);
 
   // Opening video plays before entering the application (skippable via ?autostart=1)
   const [showOpeningVideo, setShowOpeningVideo] = useState<boolean>(() => {
@@ -187,6 +191,7 @@ export default function App() {
           setLoginModalOpen(true);
         }}
         onLogout={handleLogout}
+        onOpenShareBlogger={() => setShareBloggerOpen(true)}
       />
 
       {/* Authentication Login Modal */}
@@ -198,6 +203,14 @@ export default function App() {
         onClose={handleLoginClose}
       />
 
+      {/* Share to Blogger / Blogspot Modal */}
+      <ShareBloggerModal
+        isOpen={shareBloggerOpen}
+        onClose={() => setShareBloggerOpen(false)}
+        schoolName={school.name}
+        periodName={activePeriod.periodName}
+      />
+
       {/* Main Content Area */}
       <main className="relative z-10 flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 py-6 md:py-8 print:p-0 print:m-0 print:max-w-none">
         {currentView === 'PUBLIC' && (
@@ -207,6 +220,7 @@ export default function App() {
             appTimeMs={appTimeMs}
             syncMeta={syncMeta}
             onNavigateToBooth={() => setCurrentView('BOOTH')}
+            onOpenShareBlogger={() => setShareBloggerOpen(true)}
           />
         )}
 
@@ -268,6 +282,7 @@ export default function App() {
               summary={summary}
               appTimeMs={appTimeMs}
               syncMeta={syncMeta}
+              onOpenShareBlogger={() => setShareBloggerOpen(true)}
             />
           ) : (
             <div className="max-w-md mx-auto my-12 p-8 bg-white/90 backdrop-blur-xl rounded-3xl shadow-xl border border-white/60 text-center space-y-4">

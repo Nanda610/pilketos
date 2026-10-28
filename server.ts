@@ -23,7 +23,7 @@ import {
   INITIAL_AUDIT_LOGS,
   INITIAL_ACCOUNTS,
 } from './src/lib/initialData';
-import { ElectionStateSnapshot } from './src/types';
+import { ElectionStateSnapshot, SchoolConfig } from './src/types';
 
 const PORT = Number(process.env.PORT) || 3000;
 const DATA_DIR = path.join(process.cwd(), '.data');
@@ -53,13 +53,27 @@ function loadStateFromDisk(): ElectionStateSnapshot {
       const raw = fs.readFileSync(STATE_FILE, 'utf-8');
       const parsed = JSON.parse(raw) as Partial<ElectionStateSnapshot>;
       if (parsed && parsed.school && Array.isArray(parsed.periods)) {
+        const rawSchool = parsed.school || {};
+        const isDefaultPlaceholder = !rawSchool.name || rawSchool.name.trim() === '' || rawSchool.name === 'SMP Negeri 1 Teladan Jakarta';
+        const schoolConfig: SchoolConfig = {
+          ...INITIAL_SCHOOL,
+          ...rawSchool,
+          name: isDefaultPlaceholder ? INITIAL_SCHOOL.name : rawSchool.name,
+          type: rawSchool.type && rawSchool.type.trim() !== '' ? rawSchool.type : INITIAL_SCHOOL.type,
+          npsn: rawSchool.npsn && rawSchool.npsn.trim() !== '' ? rawSchool.npsn : INITIAL_SCHOOL.npsn,
+          address: rawSchool.address && rawSchool.address.trim() !== '' ? rawSchool.address : INITIAL_SCHOOL.address,
+          city: rawSchool.city && rawSchool.city.trim() !== '' ? rawSchool.city : INITIAL_SCHOOL.city,
+          province: rawSchool.province && rawSchool.province.trim() !== '' ? rawSchool.province : INITIAL_SCHOOL.province,
+          principalName: rawSchool.principalName && rawSchool.principalName.trim() !== '' ? rawSchool.principalName : INITIAL_SCHOOL.principalName,
+        };
+
         return {
           revision: typeof parsed.revision === 'number' ? parsed.revision : 1,
           updatedAt: parsed.updatedAt || new Date().toISOString(),
           updatedBy: parsed.updatedBy || 'Server Utama',
           lastAction: parsed.lastAction || 'LOAD_DISK',
           appTimeOffsetMs: typeof parsed.appTimeOffsetMs === 'number' ? parsed.appTimeOffsetMs : 0,
-          school: parsed.school,
+          school: schoolConfig,
           periods: parsed.periods,
           candidates: Array.isArray(parsed.candidates) ? parsed.candidates : INITIAL_CANDIDATES,
           voters: Array.isArray(parsed.voters) ? parsed.voters : INITIAL_VOTERS,
@@ -93,7 +107,7 @@ async function startServer() {
   const app = express();
   const httpServer = createServer(app);
 
-  // CORS & No-Cache middleware to prevent stale responses across proxies, Cloud Run, and multi-browser clients
+  // CORS & No-Cache & Embed Middleware to allow seamless iframe embedding on Blogger, Blogspot, and external sites
   app.use((req, res, next) => {
     res.header('Access-Control-Allow-Origin', '*');
     res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
@@ -101,6 +115,8 @@ async function startServer() {
     res.header('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
     res.header('Pragma', 'no-cache');
     res.header('Expires', '0');
+    res.header('X-Frame-Options', 'ALLOWALL');
+    res.header('Content-Security-Policy', "frame-ancestors *");
     if (req.method === 'OPTIONS') {
       res.sendStatus(204);
       return;

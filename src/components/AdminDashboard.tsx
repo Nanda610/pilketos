@@ -22,6 +22,7 @@ import { OpeningSequence } from './OpeningSequence';
 import { SchoolCrestLogo, OsisLogoBadge } from './CandidateAvatar';
 import { formatAppTimeDisplay } from '../lib/realtimeSync';
 import { GarudaIcon } from './GarudaIcon';
+import { BloggerIcon } from './BloggerIcon';
 
 interface AdminDashboardProps {
   school: SchoolConfig;
@@ -31,6 +32,7 @@ interface AdminDashboardProps {
   summary: ElectionSummary;
   appTimeMs: number;
   syncMeta: RealtimeSyncMetadata;
+  onOpenShareBlogger?: () => void;
 }
 
 export const AdminDashboard: React.FC<AdminDashboardProps> = ({
@@ -41,8 +43,9 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   summary,
   appTimeMs,
   syncMeta,
+  onOpenShareBlogger,
 }) => {
-  const [activeTab, setActiveTab] = useState<'periods' | 'school' | 'committee' | 'audit' | 'video' | 'security'>('periods');
+  const [activeTab, setActiveTab] = useState<'periods' | 'school' | 'committee' | 'audit' | 'video' | 'security' | 'blogger'>('periods');
   const [showNewPeriodModal, setShowNewPeriodModal] = useState(false);
   const [showAddCommitteeModal, setShowAddCommitteeModal] = useState(false);
   const [showBahpModal, setShowBahpModal] = useState(false);
@@ -82,13 +85,45 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const [openingVideoInputUrl, setOpeningVideoInputUrl] = useState(school.openingVideoUrl || '');
   const [isUploadingVideo, setIsUploadingVideo] = useState(false);
 
-  // School form state synced with live school config
+  // School form state with user-edit protection (prevents polling re-renders from overwriting typed inputs)
   const [schoolForm, setSchoolForm] = useState<SchoolConfig>(school);
+  const [isSchoolFormEdited, setIsSchoolFormEdited] = useState(false);
 
   useEffect(() => {
+    if (!isSchoolFormEdited) {
+      setSchoolForm(school);
+      setOpeningVideoInputUrl(school.openingVideoUrl || '');
+    }
+  }, [school, isSchoolFormEdited]);
+
+  const updateSchoolFormField = (field: keyof SchoolConfig, value: any) => {
+    setIsSchoolFormEdited(true);
+    setSchoolForm((prev) => ({ ...prev, [field]: value }));
+  };
+
+  const handleSaveSchool = (e: React.FormEvent) => {
+    e.preventDefault();
+    const cleanForm: SchoolConfig = {
+      ...schoolForm,
+      name: schoolForm.name.trim() || 'SMP ISLAM YASPAI',
+      type: schoolForm.type || 'OSIS',
+      npsn: schoolForm.npsn || '20519118',
+      address: schoolForm.address || 'Jl. Cangkringmalang.',
+      city: schoolForm.city || 'Kab. Pasuruan',
+      province: schoolForm.province || 'Jawatimur',
+      principalName: schoolForm.principalName || 'Nanang Supriyanto, S.Pd.',
+    };
+    setSchoolForm(cleanForm);
+    setIsSchoolFormEdited(false);
+    electionStore.updateSchool(cleanForm);
+    showAlert('Konfigurasi identitas lembaga berhasil disimpan & disinkronkan ke seluruh sistem!');
+  };
+
+  const handleCancelSchoolEdits = () => {
     setSchoolForm(school);
-    setOpeningVideoInputUrl(school.openingVideoUrl || '');
-  }, [school]);
+    setIsSchoolFormEdited(false);
+    showAlert('Perubahan identitas dibatalkan.');
+  };
 
   // New period state
   const [newPeriod, setNewPeriod] = useState({
@@ -165,11 +200,6 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     reader.readAsDataURL(file);
   };
 
-  const handleSaveSchool = (e: React.FormEvent) => {
-    e.preventDefault();
-    electionStore.updateSchool(schoolForm);
-    showAlert('Konfigurasi satuan pendidikan berhasil diperbarui.');
-  };
 
   const handleActivatePeriod = (periodId: string) => {
     if (confirm('Aktifkan periode ini? Periode lain yang sedang aktif akan otomatis ditandai sebagai selesai/arsip.')) {
@@ -390,6 +420,18 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
           >
             <ShieldCheck className="w-3.5 h-3.5 text-indigo-600" />
             <span>Akun & Keamanan</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => setActiveTab('blogger')}
+            className={`px-3.5 py-2 text-xs font-semibold rounded-xl transition-all cursor-pointer flex items-center gap-1.5 ${
+              activeTab === 'blogger'
+                ? 'glass-button bg-orange-600 text-white shadow-sm font-bold border-orange-500'
+                : 'text-orange-800 bg-orange-500/15 hover:bg-orange-500/25 border border-orange-500/20'
+            }`}
+          >
+            <BloggerIcon size={14} />
+            <span>Integrasi Blogger</span>
           </button>
         </div>
       </div>
@@ -622,13 +664,20 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
       {/* TAB 2: SCHOOL IDENTITY SETUP */}
       {activeTab === 'school' && (
         <div className="max-w-2xl glass-panel rounded-3xl p-6 md:p-8 shadow-lg space-y-6">
-          <div>
-            <h2 className="text-base font-black text-slate-900 tracking-tight">
-              Konfigurasi Satuan Pendidikan (Sekolah / Madrasah)
-            </h2>
-            <p className="text-xs text-slate-600 mt-0.5">
-              Identitas ini tercetak otomatis pada kop surat, surat suara digital, dan Berita Acara Hasil Pemilihan (BAHP).
-            </p>
+          <div className="flex items-center justify-between">
+            <div>
+              <h2 className="text-base font-black text-slate-900 tracking-tight">
+                Konfigurasi Satuan Pendidikan (Sekolah / Madrasah)
+              </h2>
+              <p className="text-xs text-slate-600 mt-0.5">
+                Identitas ini tercetak otomatis pada kop surat, surat suara digital, dan Berita Acara Hasil Pemilihan (BAHP).
+              </p>
+            </div>
+            {isSchoolFormEdited && (
+              <span className="px-3 py-1 rounded-full text-[11px] font-bold bg-amber-100 text-amber-900 border border-amber-300 animate-pulse">
+                ✏️ Ada Perubahan Belum Disimpan
+              </span>
+            )}
           </div>
 
           <form onSubmit={handleSaveSchool} className="space-y-4">
@@ -638,8 +687,8 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                   Jenis Organisasi Siswa
                 </label>
                 <select
-                  value={schoolForm.type}
-                  onChange={(e) => setSchoolForm({ ...schoolForm, type: e.target.value as any })}
+                  value={schoolForm.type || 'OSIS'}
+                  onChange={(e) => updateSchoolFormField('type', e.target.value)}
                   className="w-full px-3.5 py-2 text-xs rounded-xl glass-input font-bold text-slate-900 focus:outline-none cursor-pointer"
                 >
                   <option value="OSIS">OSIS (Organisasi Siswa Intra Sekolah)</option>
@@ -653,10 +702,10 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                 </label>
                 <input
                   type="text"
-                  value={schoolForm.npsn}
-                  onChange={(e) => setSchoolForm({ ...schoolForm, npsn: e.target.value })}
+                  value={schoolForm.npsn || ''}
+                  onChange={(e) => updateSchoolFormField('npsn', e.target.value)}
+                  placeholder="20519118"
                   className="w-full px-3.5 py-2 text-xs rounded-xl glass-input font-mono text-slate-900 focus:outline-none"
-                  required
                 />
               </div>
             </div>
@@ -667,8 +716,9 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
               </label>
               <input
                 type="text"
-                value={schoolForm.name}
-                onChange={(e) => setSchoolForm({ ...schoolForm, name: e.target.value })}
+                value={schoolForm.name || ''}
+                onChange={(e) => updateSchoolFormField('name', e.target.value)}
+                placeholder="SMP ISLAM YASPAI"
                 className="w-full px-3.5 py-2 text-xs rounded-xl glass-input font-bold text-slate-900 focus:outline-none"
                 required
               />
@@ -680,10 +730,10 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
               </label>
               <textarea
                 rows={2}
-                value={schoolForm.address}
-                onChange={(e) => setSchoolForm({ ...schoolForm, address: e.target.value })}
+                value={schoolForm.address || ''}
+                onChange={(e) => updateSchoolFormField('address', e.target.value)}
+                placeholder="Jl. Cangkringmalang"
                 className="w-full px-3.5 py-2 text-xs rounded-xl glass-input text-slate-900 focus:outline-none"
-                required
               />
             </div>
 
@@ -692,20 +742,20 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                 <label className="block text-xs font-semibold text-slate-700 mb-1">Kota / Kabupaten</label>
                 <input
                   type="text"
-                  value={schoolForm.city}
-                  onChange={(e) => setSchoolForm({ ...schoolForm, city: e.target.value })}
+                  value={schoolForm.city || ''}
+                  onChange={(e) => updateSchoolFormField('city', e.target.value)}
+                  placeholder="Kab. Pasuruan"
                   className="w-full px-3.5 py-2 text-xs rounded-xl glass-input text-slate-900 focus:outline-none"
-                  required
                 />
               </div>
               <div>
                 <label className="block text-xs font-semibold text-slate-700 mb-1">Provinsi</label>
                 <input
                   type="text"
-                  value={schoolForm.province}
-                  onChange={(e) => setSchoolForm({ ...schoolForm, province: e.target.value })}
+                  value={schoolForm.province || ''}
+                  onChange={(e) => updateSchoolFormField('province', e.target.value)}
+                  placeholder="Jawa Timur"
                   className="w-full px-3.5 py-2 text-xs rounded-xl glass-input text-slate-900 focus:outline-none"
-                  required
                 />
               </div>
               <div>
@@ -713,8 +763,8 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                 <input
                   type="text"
                   value={schoolForm.postalCode || ''}
-                  onChange={(e) => setSchoolForm({ ...schoolForm, postalCode: e.target.value })}
-                  placeholder="10330 / 40123"
+                  onChange={(e) => updateSchoolFormField('postalCode', e.target.value)}
+                  placeholder="10330 / 67156"
                   className="w-full px-3.5 py-2 text-xs rounded-xl glass-input font-mono text-slate-900 focus:outline-none"
                 />
               </div>
@@ -726,8 +776,8 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                 <input
                   type="email"
                   value={schoolForm.email || ''}
-                  onChange={(e) => setSchoolForm({ ...schoolForm, email: e.target.value })}
-                  placeholder="info@sekolah.sch.id"
+                  onChange={(e) => updateSchoolFormField('email', e.target.value)}
+                  placeholder="info@smpyaspai.sch.id"
                   className="w-full px-3.5 py-2 text-xs rounded-xl glass-input text-slate-900 focus:outline-none"
                 />
               </div>
@@ -735,8 +785,9 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                 <label className="block text-xs font-semibold text-slate-700 mb-1">Nomor Telepon</label>
                 <input
                   type="text"
-                  value={schoolForm.phone}
-                  onChange={(e) => setSchoolForm({ ...schoolForm, phone: e.target.value })}
+                  value={schoolForm.phone || ''}
+                  onChange={(e) => updateSchoolFormField('phone', e.target.value)}
+                  placeholder="(0343) 123456"
                   className="w-full px-3.5 py-2 text-xs rounded-xl glass-input text-slate-900 focus:outline-none"
                 />
               </div>
@@ -744,8 +795,9 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                 <label className="block text-xs font-semibold text-slate-700 mb-1">Laman Resmi (Website)</label>
                 <input
                   type="text"
-                  value={schoolForm.website}
-                  onChange={(e) => setSchoolForm({ ...schoolForm, website: e.target.value })}
+                  value={schoolForm.website || ''}
+                  onChange={(e) => updateSchoolFormField('website', e.target.value)}
+                  placeholder="https://smpyaspai.sch.id"
                   className="w-full px-3.5 py-2 text-xs rounded-xl glass-input text-slate-900 focus:outline-none"
                 />
               </div>
@@ -758,22 +810,22 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                 </label>
                 <input
                   type="text"
-                  value={schoolForm.principalName}
-                  onChange={(e) => setSchoolForm({ ...schoolForm, principalName: e.target.value })}
+                  value={schoolForm.principalName || ''}
+                  onChange={(e) => updateSchoolFormField('principalName', e.target.value)}
+                  placeholder="Nanang Supriyanto, S.Pd."
                   className="w-full px-3.5 py-2 text-xs rounded-xl glass-input text-slate-900 focus:outline-none font-semibold"
-                  required
                 />
               </div>
               <div>
                 <label className="block text-xs font-semibold text-slate-700 mb-1">
-                  NIP Kepala Sekolah
+                  NIP Kepala Sekolah (Opsional)
                 </label>
                 <input
                   type="text"
-                  value={schoolForm.principalNip}
-                  onChange={(e) => setSchoolForm({ ...schoolForm, principalNip: e.target.value })}
+                  value={schoolForm.principalNip || ''}
+                  onChange={(e) => updateSchoolFormField('principalNip', e.target.value)}
+                  placeholder="Kosongkan jika bukan PNS"
                   className="w-full px-3.5 py-2 text-xs rounded-xl glass-input font-mono text-slate-900 focus:outline-none"
-                  required
                 />
               </div>
             </div>
@@ -834,7 +886,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                           <button
                             type="button"
                             onClick={() => {
-                              setSchoolForm({ ...schoolForm, osisLogoUrl: '' });
+                              updateSchoolFormField('osisLogoUrl', '');
                               electionStore.updateSchool({ osisLogoUrl: '' });
                               showAlert(`Logo kustom ${schoolForm.type} telah dihapus.`);
                             }}
@@ -852,7 +904,16 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
               </div>
             </div>
 
-            <div className="pt-3 border-t border-slate-200/60 flex items-center justify-end">
+            <div className="pt-3 border-t border-slate-200/60 flex items-center justify-end gap-2">
+              {isSchoolFormEdited && (
+                <button
+                  type="button"
+                  onClick={handleCancelSchoolEdits}
+                  className="px-4 py-2.5 rounded-xl border border-slate-300 bg-white hover:bg-slate-100 text-slate-700 text-xs font-bold transition-all cursor-pointer"
+                >
+                  Batal
+                </button>
+              )}
               <button
                 type="submit"
                 className="px-5 py-2.5 rounded-xl bg-slate-900 hover:bg-slate-800 text-white text-xs font-bold shadow-sm flex items-center gap-1.5 transition-all cursor-pointer"
@@ -1450,6 +1511,85 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
           </div>
         );
       })()}
+
+      {/* TAB 7: INTEGRASI WEB BLOGGER */}
+      {activeTab === 'blogger' && (
+        <div className="space-y-6 animate-in fade-in">
+          <div className="p-6 md:p-8 rounded-3xl glass-panel shadow-sm border border-white/80 space-y-6 bg-gradient-to-br from-orange-500/10 via-amber-500/5 to-white">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-4 border-b border-orange-200">
+              <div className="flex items-center gap-3">
+                <div className="w-12 h-12 rounded-2xl bg-[#FF5722] text-white flex items-center justify-center shadow-lg shadow-orange-500/30 shrink-0">
+                  <BloggerIcon size={28} className="text-white" />
+                </div>
+                <div>
+                  <h3 className="text-base font-black text-slate-900 tracking-tight">
+                    Integrasi & Sematkan Aplikasi ke Web Blogger / Blogspot
+                  </h3>
+                  <p className="text-xs text-slate-600 mt-0.5">
+                    Kelola dan dapatkan kode semat (embed iframe) serta template tema XML resmi untuk situs Blogger sekolah
+                  </p>
+                </div>
+              </div>
+
+              {onOpenShareBlogger && (
+                <button
+                  type="button"
+                  onClick={onOpenShareBlogger}
+                  className="px-5 py-3 rounded-2xl bg-gradient-to-r from-[#FF5722] to-orange-500 hover:from-orange-600 hover:to-orange-500 text-white font-extrabold text-xs shadow-lg shadow-orange-500/30 transition-all hover:scale-105 active:scale-95 cursor-pointer flex items-center gap-2 shrink-0"
+                >
+                  <BloggerIcon size={18} />
+                  <span>Buka Generator Kode Blogger</span>
+                </button>
+              )}
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+              <div className="p-5 rounded-2xl bg-white/90 border border-slate-200 shadow-2xs space-y-2">
+                <div className="w-8 h-8 rounded-xl bg-sky-100 text-sky-700 flex items-center justify-center font-bold text-xs">
+                  1
+                </div>
+                <h4 className="text-xs font-bold text-slate-900">Postingan Baru</h4>
+                <p className="text-[11px] text-slate-600 leading-relaxed">
+                  Sematkan hitung cepat atau bilik suara langsung di dalam postingan artikel blogspot sekolah menggunakan mode HTML (&lt;&gt;).
+                </p>
+              </div>
+
+              <div className="p-5 rounded-2xl bg-white/90 border border-slate-200 shadow-2xs space-y-2">
+                <div className="w-8 h-8 rounded-xl bg-orange-100 text-orange-700 flex items-center justify-center font-bold text-xs">
+                  2
+                </div>
+                <h4 className="text-xs font-bold text-slate-900">Widget Tata Letak</h4>
+                <p className="text-[11px] text-slate-600 leading-relaxed">
+                  Pasang widget hitung cepat di sidebar atau footer blog sekolah menggunakan Gadget HTML/JavaScript Blogger.
+                </p>
+              </div>
+
+              <div className="p-5 rounded-2xl bg-white/90 border border-slate-200 shadow-2xs space-y-2">
+                <div className="w-8 h-8 rounded-xl bg-purple-100 text-purple-700 flex items-center justify-center font-bold text-xs">
+                  3
+                </div>
+                <h4 className="text-xs font-bold text-slate-900">Template Tema XML (Error 400 Free)</h4>
+                <p className="text-[11px] text-slate-600 leading-relaxed">
+                  Gunakan template tema XML lengkap yang sudah dilengkapi tag wajib &lt;b:skin&gt; dan &lt;b:includable&gt; agar 100% bebas error.
+                </p>
+              </div>
+            </div>
+
+            {onOpenShareBlogger && (
+              <div className="pt-2 flex justify-center">
+                <button
+                  type="button"
+                  onClick={onOpenShareBlogger}
+                  className="px-6 py-3.5 rounded-2xl bg-slate-900 hover:bg-slate-800 text-white font-extrabold text-xs shadow-xl transition-all cursor-pointer flex items-center gap-2"
+                >
+                  <BloggerIcon size={18} />
+                  <span>Buka Modal Kode Semat & Panduan Solusi Blogger</span>
+                </button>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
 
       {/* MODAL: PREVIEW OPENING SEQUENCE */}
       {showOpeningPreview && (() => {

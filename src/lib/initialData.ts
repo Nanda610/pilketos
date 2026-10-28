@@ -9,19 +9,19 @@ import { SchoolConfig, ElectionPeriod, Candidate, Voter, AnonymousVote, Committe
 import { hashPin } from './security';
 
 export const INITIAL_SCHOOL: SchoolConfig = {
-  id: 'sch_smpn1_teladan',
-  name: 'SMP Negeri 1 Teladan Jakarta',
+  id: 'sch_smp_yaspai',
+  name: 'SMP ISLAM YASPAI',
   type: 'OSIS',
-  npsn: '20101452',
-  address: 'Jl. Cikini Raya No. 45, Menteng',
-  city: 'Jakarta Pusat',
-  province: 'DKI Jakarta',
+  npsn: '20519118',
+  address: 'Jl. Cangkringmalang.',
+  city: 'Kab. Pasuruan',
+  province: 'Jawatimur',
   postalCode: '10330',
   phone: '(021) 31924510',
-  website: 'https://smpn1teladan.sch.id',
-  principalName: 'Dra. Hj. Sri Wahyuni, M.Pd.',
-  principalNip: '19710315 199602 2 001',
-  email: 'info@smpn1teladan.sch.id',
+  website: 'https://smpyaspai.sch.id',
+  principalName: 'Nanang Supriyanto, S.Pd.',
+  principalNip: '',
+  email: 'info@smpyaspai.sch.id',
   logoUrl: '',
   osisLogoUrl: '',
 };
@@ -29,7 +29,7 @@ export const INITIAL_SCHOOL: SchoolConfig = {
 export const INITIAL_PERIODS: ElectionPeriod[] = [
   {
     id: 'period_2024_2025',
-    schoolId: 'sch_smpn1_teladan',
+    schoolId: 'sch_smp_yaspai',
     periodName: 'Pemilihan Umum Ketua OSIS SMP 2024/2025',
     academicYear: '2024/2025',
     startDate: '2024-09-12',
@@ -42,7 +42,7 @@ export const INITIAL_PERIODS: ElectionPeriod[] = [
   },
   {
     id: 'period_2025_2026',
-    schoolId: 'sch_smpn1_teladan',
+    schoolId: 'sch_smp_yaspai',
     periodName: 'Pemilihan Umum Ketua OSIS SMP 2025/2026',
     academicYear: '2025/2026',
     startDate: '2025-09-18',
@@ -55,7 +55,7 @@ export const INITIAL_PERIODS: ElectionPeriod[] = [
   },
   {
     id: 'period_2026_2027',
-    schoolId: 'sch_smpn1_teladan',
+    schoolId: 'sch_smp_yaspai',
     periodName: 'Pemilihan Umum Ketua & Wakil Ketua OSIS SMP 2026/2027',
     academicYear: '2026/2027',
     startDate: '2026-10-24',
@@ -79,7 +79,7 @@ export const INITIAL_CANDIDATES: Candidate[] = [
     viceChairmanClass: 'VIII B',
     photoUrl: '',
     motto: 'Cerdas Berkarakter 5S, Santun, dan Aktif Berprestasi Bersama',
-    vision: 'Mewujudkan OSIS SMP Negeri 1 Teladan sebagai poros organisasi siswa yang inklusif, membina sopan santun 5S, memajukan kreativitas pelajar, dan berlandaskan Profil Pelajar Pancasila.',
+    vision: 'Mewujudkan OSIS SMP ISLAM YASPAI sebagai poros organisasi siswa yang inklusif, membina sopan santun 5S, memajukan kreativitas pelajar, dan berlandaskan Profil Pelajar Pancasila.',
     mission: [
       'Menghidupkan budaya 5S (Senyum, Salam, Sapa, Sopan, Santun) di seluruh lingkungan kelas 7, 8, dan 9.',
       'Mengoptimalkan aspirasi siswa melalui kotak suara & dialog berkala (Sahabat OSIS Mendengar).',

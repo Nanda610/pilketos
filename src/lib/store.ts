@@ -620,7 +620,25 @@ export class ElectionStore {
       const savedAccounts = localStorage.getItem(`${STORAGE_KEY_PREFIX}_accounts`);
       const savedMeta = localStorage.getItem(`${STORAGE_KEY_PREFIX}_meta`);
 
-      if (savedSchool) this.school = JSON.parse(savedSchool);
+      if (savedSchool) {
+        try {
+          const parsedSchool = JSON.parse(savedSchool);
+          const isDefaultPlaceholder = !parsedSchool.name || parsedSchool.name.trim() === '' || parsedSchool.name === 'SMP Negeri 1 Teladan Jakarta';
+          this.school = {
+            ...INITIAL_SCHOOL,
+            ...parsedSchool,
+            name: isDefaultPlaceholder ? INITIAL_SCHOOL.name : parsedSchool.name,
+            type: parsedSchool.type && parsedSchool.type.trim() !== '' ? parsedSchool.type : INITIAL_SCHOOL.type,
+            npsn: parsedSchool.npsn && parsedSchool.npsn.trim() !== '' ? parsedSchool.npsn : INITIAL_SCHOOL.npsn,
+            address: parsedSchool.address && parsedSchool.address.trim() !== '' ? parsedSchool.address : INITIAL_SCHOOL.address,
+            city: parsedSchool.city && parsedSchool.city.trim() !== '' ? parsedSchool.city : INITIAL_SCHOOL.city,
+            province: parsedSchool.province && parsedSchool.province.trim() !== '' ? parsedSchool.province : INITIAL_SCHOOL.province,
+            principalName: parsedSchool.principalName && parsedSchool.principalName.trim() !== '' ? parsedSchool.principalName : INITIAL_SCHOOL.principalName,
+          };
+        } catch {
+          this.school = INITIAL_SCHOOL;
+        }
+      }
       if (savedPeriods) this.periods = JSON.parse(savedPeriods);
       if (savedCandidates) this.candidates = JSON.parse(savedCandidates);
       if (savedVoters) this.voters = JSON.parse(savedVoters);

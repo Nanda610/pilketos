@@ -12,6 +12,7 @@ import React from 'react';
 import { Vote, BarChart3, Clock, Radio, Lock, LogOut, ShieldCheck, Users } from 'lucide-react';
 import { SchoolConfig, RealtimeSyncMetadata, AuthSession, UserRole } from '../types';
 import { formatAppTimeDisplay } from '../lib/realtimeSync';
+import { BloggerIcon } from './BloggerIcon';
 
 export type AppView = 'PUBLIC' | 'BOOTH' | 'PANITIA' | 'ADMIN' | 'PRD';
 
@@ -24,6 +25,7 @@ interface NavbarProps {
   activeSession?: AuthSession | null;
   onOpenLoginModal?: (targetRole?: UserRole) => void;
   onLogout?: () => void;
+  onOpenShareBlogger?: () => void;
 }
 
 export const Navbar: React.FC<NavbarProps> = ({
@@ -35,6 +37,7 @@ export const Navbar: React.FC<NavbarProps> = ({
   activeSession,
   onOpenLoginModal,
   onLogout,
+  onOpenShareBlogger,
 }) => {
   const formattedClock = formatAppTimeDisplay(appTimeMs);
 
@@ -161,6 +164,8 @@ export const Navbar: React.FC<NavbarProps> = ({
             </button>
           )}
 
+
+
           {/* Unified Application Clock & Online Sync Indicator */}
           <div
             className="flex items-center gap-1.5 sm:gap-2.5 px-2 sm:px-3 py-1 sm:py-1.5 rounded-xl bg-white/85 border border-slate-200/80 shadow-2xs text-[11px] sm:text-xs"
@@ -249,6 +254,8 @@ export const Navbar: React.FC<NavbarProps> = ({
           {(!activeSession || activeSession.role !== 'admin') && <Lock className="w-2.5 h-2.5 text-slate-400" />}
           <span>Admin Sekolah</span>
         </button>
+
+
 
         {activeSession ? (
           <button

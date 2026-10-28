@@ -21,6 +21,7 @@ import { CandidateVideoDisplay } from './CandidateVideoDisplay';
 import { formatAppTimeDisplay, evaluateVotingSchedule } from '../lib/realtimeSync';
 import { electionStore } from '../lib/store';
 import { GarudaIcon } from './GarudaIcon';
+import { BloggerIcon } from './BloggerIcon';
 
 interface QuickCountDashboardProps {
   school: SchoolConfig;
@@ -28,6 +29,7 @@ interface QuickCountDashboardProps {
   appTimeMs: number;
   syncMeta: RealtimeSyncMetadata;
   onNavigateToBooth: () => void;
+  onOpenShareBlogger?: () => void;
 }
 
 // Helper component for smooth numeric counter animation ("pencapaian hasil angka")
@@ -102,6 +104,7 @@ export const QuickCountDashboard: React.FC<QuickCountDashboardProps> = ({
   appTimeMs,
   syncMeta,
   onNavigateToBooth,
+  onOpenShareBlogger,
 }) => {
   const [selectedCandidate, setSelectedCandidate] = useState<Candidate | null>(null);
   const [chartView, setChartView] = useState<'bar' | 'donut'>('bar');
@@ -388,6 +391,8 @@ export const QuickCountDashboard: React.FC<QuickCountDashboardProps> = ({
                 <RotateCcw className={`w-3.5 h-3.5 ${isManualSyncing ? 'animate-spin text-sky-600' : 'text-slate-600'}`} />
                 <span>{isManualSyncing ? 'Menyinkronkan...' : 'Sinkronkan'}</span>
               </button>
+
+
 
               {leadingCandidate && leadingCandidate.voteCount > 0 && (
                 <span className="text-xs bg-emerald-500/10 text-emerald-800 border border-emerald-500/25 px-3 py-1 rounded-full font-bold flex items-center gap-1.5 backdrop-blur-xs">
