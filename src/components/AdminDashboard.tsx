@@ -421,18 +421,6 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
             <ShieldCheck className="w-3.5 h-3.5 text-indigo-600" />
             <span>Akun & Keamanan</span>
           </button>
-          <button
-            type="button"
-            onClick={() => setActiveTab('blogger')}
-            className={`px-3.5 py-2 text-xs font-semibold rounded-xl transition-all cursor-pointer flex items-center gap-1.5 ${
-              activeTab === 'blogger'
-                ? 'glass-button bg-orange-600 text-white shadow-sm font-bold border-orange-500'
-                : 'text-orange-800 bg-orange-500/15 hover:bg-orange-500/25 border border-orange-500/20'
-            }`}
-          >
-            <BloggerIcon size={14} />
-            <span>Integrasi Blogger</span>
-          </button>
         </div>
       </div>
 
@@ -1570,7 +1558,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                 </div>
                 <h4 className="text-xs font-bold text-slate-900">Template Tema XML (Error 400 Free)</h4>
                 <p className="text-[11px] text-slate-600 leading-relaxed">
-                  Gunakan template tema XML lengkap yang sudah dilengkapi tag wajib &lt;b:skin&gt; dan &lt;b:includable&gt; agar 100% bebas error.
+                  Gunakan template tema XML lengkap (atau unduh file <code>.xml</code>) dengan tag wajib &lt;b:skin&gt; dan &lt;b:section&gt; agar 100% bebas error dan bebas token acak.
                 </p>
               </div>
             </div>

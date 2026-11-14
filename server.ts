@@ -115,8 +115,8 @@ async function startServer() {
     res.header('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
     res.header('Pragma', 'no-cache');
     res.header('Expires', '0');
-    res.header('X-Frame-Options', 'ALLOWALL');
-    res.header('Content-Security-Policy', "frame-ancestors *");
+    res.removeHeader('X-Frame-Options');
+    res.header('Content-Security-Policy', 'frame-ancestors *');
     if (req.method === 'OPTIONS') {
       res.sendStatus(204);
       return;

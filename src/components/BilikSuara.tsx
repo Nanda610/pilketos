@@ -218,7 +218,7 @@ export const BilikSuara: React.FC<BilikSuaraProps> = ({ school, appTimeMs, syncM
                 Selamat Datang di Bilik Suara Siswa
               </h1>
               <p className="text-xs text-slate-300 leading-relaxed">
-                Silakan masukkan <strong>NISN 10 digit</strong> dan <strong>Token PIN 6 karakter</strong> yang tercetak pada Kartu Suara Anda dari Meja Panitia Pemilihan.
+                Silakan masukkan <strong>NISN</strong> dan <strong>Token PIN 6 karakter</strong> yang tercetak pada Kartu Suara Anda dari Meja Panitia Pemilihan.
               </p>
 
               <div className="space-y-3 pt-2">
@@ -267,7 +267,6 @@ export const BilikSuara: React.FC<BilikSuaraProps> = ({ school, appTimeMs, syncM
                   <input
                     type="text"
                     inputMode="numeric"
-                    maxLength={10}
                     value={nisn}
                     onChange={(e) => setNisn(e.target.value.replace(/\D/g, ''))}
                     placeholder="Contoh: 0111234001"
@@ -275,7 +274,7 @@ export const BilikSuara: React.FC<BilikSuaraProps> = ({ school, appTimeMs, syncM
                     required
                   />
                   <span className="absolute right-3.5 top-3.5 text-xs text-slate-400 font-medium font-mono">
-                    {nisn.length}/10 digit
+                    {nisn.length} digit
                   </span>
                 </div>
               </div>

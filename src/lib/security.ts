@@ -23,16 +23,16 @@ export function generateRandomPin(length = 6): string {
 }
 
 /**
- * Validates Indonesian NISN (Nomor Induk Siswa Nasional).
- * Must be exactly 10 numeric digits.
+ * Validates student NISN / numeric ID.
+ * Accepts numeric digits of any length (no strict 10-digit requirement).
  */
 export function validateNisn(nisn: string): { isValid: boolean; message?: string } {
   const cleaned = (nisn || '').trim();
   if (!cleaned) {
     return { isValid: false, message: 'NISN tidak boleh kosong.' };
   }
-  if (!/^\d{10}$/.test(cleaned)) {
-    return { isValid: false, message: 'NISN harus terdiri dari tepat 10 digit angka.' };
+  if (!/^\d+$/.test(cleaned)) {
+    return { isValid: false, message: 'NISN hanya boleh terdiri dari angka.' };
   }
   return { isValid: true };
 }

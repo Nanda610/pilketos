@@ -635,7 +635,7 @@ export const PanitiaDashboard: React.FC<PanitiaDashboardProps> = ({ school, peri
                 <thead className="bg-slate-100/80 backdrop-blur-md text-slate-700 font-bold border-b border-slate-200/80">
                   <tr>
                     <th className="p-3 w-12 text-center">No</th>
-                    <th className="p-3">NISN (10 Digit)</th>
+                    <th className="p-3">NISN</th>
                     <th className="p-3">Nama Lengkap</th>
                     <th className="p-3">Kelas</th>
                     <th className="p-3 text-center">JK</th>
@@ -1208,14 +1208,14 @@ export const PanitiaDashboard: React.FC<PanitiaDashboardProps> = ({ school, peri
             <form onSubmit={handleAddVoter} className="space-y-3">
               <div>
                 <label className="block text-xs font-semibold text-slate-700 mb-1">
-                  NISN (10 Digit Angka)
+                  NISN (Angka Bebas)
                 </label>
                 <input
                   type="text"
-                  maxLength={10}
+                  inputMode="numeric"
                   value={newVoter.nisn}
                   onChange={(e) => setNewVoter({ ...newVoter, nisn: e.target.value.replace(/\D/g, '') })}
-                  placeholder="Contoh: 0081234567"
+                  placeholder="Contoh: 0081234567 atau 12345"
                   className="w-full px-3 py-2 text-xs rounded-xl glass-input font-mono text-slate-900 focus:outline-none"
                   required
                 />

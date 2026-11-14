@@ -12,7 +12,8 @@ import { motion, AnimatePresence } from 'motion/react';
 import { 
   X, Copy, Check, ExternalLink, Share2, Code2, Sparkles, 
   HelpCircle, Eye, Monitor, Smartphone, Layers, CheckCircle2,
-  BookOpen, ArrowRight, ShieldCheck, Vote, BarChart3, AlertTriangle, FileCode
+  BookOpen, ArrowRight, ShieldCheck, Vote, BarChart3, AlertTriangle, FileCode,
+  Download, Globe
 } from 'lucide-react';
 import { BloggerIcon } from './BloggerIcon';
 
@@ -42,6 +43,22 @@ export const ShareBloggerModal: React.FC<ShareBloggerModalProps> = ({
   const [guideStep, setGuideStep] = useState<'update_gagal' | 'theme_error' | 'post' | 'gadget' | 'page'>('update_gagal');
 
   const [customUrl, setCustomUrl] = useState<string>('');
+  const [livePreviewMode, setLivePreviewMode] = useState<'mockup' | 'live'>('mockup');
+
+  // Detect current browser origin & whether it's a private dev/localhost URL
+  const detectedOrigin = useMemo(() => {
+    if (typeof window !== 'undefined') {
+      return `${window.location.protocol}//${window.location.host}`;
+    }
+    return 'https://epilketos-digital.sch.id';
+  }, []);
+
+  const suggestedSharedUrl = useMemo(() => {
+    if (typeof window !== 'undefined' && window.location.host.startsWith('ais-dev-')) {
+      return `https://${window.location.host.replace(/^ais-dev-/, 'ais-pre-')}`;
+    }
+    return '';
+  }, []);
 
   // Compute actual base URL from custom input, browser, or fallback
   const baseUrl = useMemo(() => {
@@ -52,11 +69,28 @@ export const ShareBloggerModal: React.FC<ShareBloggerModalProps> = ({
       }
       return trimmed.replace(/\/+$/, '');
     }
-    if (typeof window !== 'undefined') {
-      return `${window.location.protocol}//${window.location.host}`;
-    }
-    return 'https://epilketos-digital.sch.id';
-  }, [customUrl]);
+    return detectedOrigin;
+  }, [customUrl, detectedOrigin]);
+
+  const isUrlUnsafeForBloggerIframe = useMemo(() => {
+    const lower = baseUrl.toLowerCase();
+    return (
+      lower.startsWith('http://') ||
+      lower.includes('localhost') ||
+      lower.includes('127.0.0.1') ||
+      lower.includes('ais-dev-')
+    );
+  }, [baseUrl]);
+
+  // Escape special XML/HTML attribute characters in schoolName so Blogger never rejects XML
+  const safeSchoolName = useMemo(() => {
+    return (schoolName || 'Sekolah')
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
+  }, [schoolName]);
 
   // Compute target URL based on options
   const targetUrl = useMemo(() => {
@@ -90,38 +124,33 @@ export const ShareBloggerModal: React.FC<ShareBloggerModalProps> = ({
 
   // Format 1: Ultra-Clean 1-Line Pure Iframe (Zero CSS wrappers, 100% immune to Blogger "Update Gagal" sanitizers)
   const minimalIframeSnippet = useMemo(() => {
-    return `<iframe src="${xmlSafeUrl}" width="100%" height="${selectedHeight.replace('px', '')}" frameborder="0" style="width:100%;height:${selectedHeight};border:none;" allowfullscreen="true" allow="clipboard-write; fullscreen" loading="lazy" title="E-Pilketos ${schoolName}"></iframe>`;
-  }, [xmlSafeUrl, selectedHeight, schoolName]);
+    return `<iframe src="${xmlSafeUrl}" width="100%" height="${selectedHeight.replace('px', '')}" frameborder="0" style="width:100%;height:${selectedHeight};border:none;" allowfullscreen="true" allow="clipboard-write; fullscreen" loading="lazy" title="E-Pilketos ${safeSchoolName}"></iframe>`;
+  }, [xmlSafeUrl, selectedHeight, safeSchoolName]);
 
   // Format 2: Styled Container Embed Code
   const embedCodeSnippet = useMemo(() => {
     return `<div style="position:relative; width:100%; max-width:1200px; margin:20px auto; border-radius:16px; overflow:hidden; box-shadow:0 10px 25px -5px rgba(0,0,0,0.1); border:1px solid #e2e8f0; background:#f8fafc;">
   <div style="padding:10px 16px; background:#0f172a; color:#ffffff; font-family:sans-serif; font-size:12px; font-weight:700; display:flex; justify-content:space-between; align-items:center;">
-    <span>🗳️ E-Pilketos Digital · ${schoolName}</span>
-    <span style="color:#38bdf8;">🔴 Real-Time Terhubung</span>
+    <span>&#128499; E-Pilketos Digital &middot; ${safeSchoolName}</span>
+    <span style="color:#38bdf8;">&#128308; Real-Time Terhubung</span>
   </div>
-  <iframe src="${xmlSafeUrl}" width="100%" height="${selectedHeight}" style="border:none; display:block; width:100%; height:${selectedHeight};" allow="clipboard-write; fullscreen" allowfullscreen="true" loading="lazy" title="E-Pilketos Digital ${schoolName}"></iframe>
+  <iframe src="${xmlSafeUrl}" width="100%" height="${selectedHeight}" style="border:none; display:block; width:100%; height:${selectedHeight};" allow="clipboard-write; fullscreen" allowfullscreen="true" loading="lazy" title="E-Pilketos Digital ${safeSchoolName}"></iframe>
 </div>`;
-  }, [schoolName, xmlSafeUrl, selectedHeight]);
+  }, [safeSchoolName, xmlSafeUrl, selectedHeight]);
 
-  // Complete 100% Valid Blogger XML Template for Theme -> Edit HTML
-  // Solves "Seharusnya ada satu dan hanya satu skin pada tema, dan kami menemukan: 0. Error 400"
-  // Solves "sb0CZ1... widget tokens" by including mandatory <b:includable id='main'> inside <b:widget>
-  // Solves "Update gagal" by escaping & as &amp;
+  // Complete 100% Valid Blogger XML Template for Theme -> Edit HTML or Theme -> Restore (.xml)
+  // - Exactly 1 <b:skin> (prevents Error 400 "skin pada tema: 0")
+  // - Empty <b:section id='main'/> without <b:widget type='Blog'> (eliminates sb0CZ1... widget tokens completely!)
+  // - Hides #navbar/.navbar injected by Blogger
+  // - Escapes & as &amp; and schoolName attributes (prevents "Update gagal")
   const themeXmlSnippet = useMemo(() => {
     return `<?xml version="1.0" encoding="UTF-8" ?>
 <!DOCTYPE html>
-<html b:css='false' b:defaultmarkups='false' b:layoutsVersion='3' b:responsive='true' xmlns='http://www.w3.org/1999/xhtml' xmlns:b='http://www.google.com/2005/gml/b' xmlns:data='http://www.google.com/2005/gml/data' xmlns:expr='http://www.google.com/2005/gml/expr'>
+<html b:css='false' b:js='false' b:version='2' expr:dir='data:blog.languageDirection' xmlns='http://www.w3.org/1999/xhtml' xmlns:b='http://www.google.com/2005/gml/b' xmlns:data='http://www.google.com/2005/gml/data' xmlns:expr='http://www.google.com/2005/gml/expr'>
 <head>
   <meta content='width=device-width, initial-scale=1, maximum-scale=1' name='viewport'/>
   <title><data:blog.pageTitle/></title>
-  
-  <!-- TAG WAJIB BLOGGER: b:skin (Mencegah Error 400 & Lolos Validasi Blogger XML) -->
   <b:skin><![CDATA[
-    /*-----------------------------------------------
-    Blogger Theme XML Resmi E-Pilketos Digital
-    100% Valid Tanpa Error 400 & Tanpa Kode Kode sb0CZ1...
-    -----------------------------------------------*/
     html, body {
       margin: 0;
       padding: 0;
@@ -131,84 +160,110 @@ export const ShareBloggerModal: React.FC<ShareBloggerModalProps> = ({
       background: #0f172a;
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
     }
+    #navbar, .navbar, .blogger-system-container {
+      display: none !important;
+      visibility: hidden !important;
+      height: 0 !important;
+      margin: 0 !important;
+      padding: 0 !important;
+      overflow: hidden !important;
+    }
     #epilketos-fullscreen-frame {
       position: fixed;
       top: 0;
       left: 0;
-      width: 100vw;
-      height: 100vh;
+      right: 0;
+      bottom: 0;
+      width: 100%;
+      height: 100%;
       border: 0;
       z-index: 999999;
       display: block;
     }
-    .blogger-system-container {
-      display: none !important;
-      visibility: hidden !important;
-      height: 0 !important;
-      overflow: hidden !important;
-    }
   ]]></b:skin>
 </head>
 <body>
-  <!-- Frame Aplikasi E-Pilketos Real-Time Layar Penuh -->
-  <iframe id='epilketos-fullscreen-frame' src='${xmlSafeUrl}' allow='clipboard-write; fullscreen; camera; microphone' allowfullscreen='true' loading='lazy' title='E-Pilketos Digital ${schoolName}'></iframe>
-
-  <!-- Section wajib arsitektur Blogger (dengan includable id=main wajib agar tidak muncul kode sb0CZ1...) -->
   <div class='blogger-system-container'>
-    <b:section id='main' showaddelement='no'>
-      <b:widget id='Blog1' locked='true' title='Blog Posts' type='Blog' version='2' visible='false'>
-        <b:includable id='main'>
-          <data:defaultTitle/>
-        </b:includable>
-      </b:widget>
-    </b:section>
+    <b:section id='main' class='main' showaddelement='no'/>
   </div>
+  <iframe id='epilketos-fullscreen-frame' src='${xmlSafeUrl}' allow='clipboard-write; fullscreen; camera; microphone' allowfullscreen='true' title='E-Pilketos Digital ${safeSchoolName}'></iframe>
 </body>
 </html>`;
-  }, [schoolName, xmlSafeUrl]);
+  }, [safeSchoolName, xmlSafeUrl]);
 
   const [embedStyle, setEmbedStyle] = useState<'minimal' | 'card'>('minimal');
   const [copiedMinimal, setCopiedMinimal] = useState(false);
 
   const activeSnippet = embedStyle === 'minimal' ? minimalIframeSnippet : embedCodeSnippet;
 
-  const handleCopyCode = async () => {
+  // Reliable clipboard copy with textarea + execCommand fallback for restricted iframes
+  const copyTextReliable = async (text: string): Promise<boolean> => {
     try {
-      await navigator.clipboard.writeText(activeSnippet);
+      if (navigator.clipboard && window.isSecureContext) {
+        await navigator.clipboard.writeText(text);
+        return true;
+      }
+    } catch {
+      // Proceed to fallback
+    }
+    try {
+      const textarea = document.createElement('textarea');
+      textarea.value = text;
+      textarea.style.position = 'fixed';
+      textarea.style.left = '-9999px';
+      textarea.style.top = '-9999px';
+      document.body.appendChild(textarea);
+      textarea.focus();
+      textarea.select();
+      const ok = document.execCommand('copy');
+      document.body.removeChild(textarea);
+      return ok;
+    } catch {
+      return false;
+    }
+  };
+
+  const handleCopyCode = async () => {
+    const ok = await copyTextReliable(activeSnippet);
+    if (ok) {
       setCopiedCode(true);
       setTimeout(() => setCopiedCode(false), 2500);
-    } catch {
-      // Fallback
     }
   };
 
   const handleCopyMinimalDirect = async () => {
-    try {
-      await navigator.clipboard.writeText(minimalIframeSnippet);
+    const ok = await copyTextReliable(minimalIframeSnippet);
+    if (ok) {
       setCopiedMinimal(true);
       setTimeout(() => setCopiedMinimal(false), 2500);
-    } catch {
-      // Fallback
     }
   };
 
   const handleCopyThemeXml = async () => {
-    try {
-      await navigator.clipboard.writeText(themeXmlSnippet);
+    const ok = await copyTextReliable(themeXmlSnippet);
+    if (ok) {
       setCopiedThemeXml(true);
       setTimeout(() => setCopiedThemeXml(false), 2500);
-    } catch {
-      // Fallback
     }
   };
 
+  const handleDownloadThemeXml = () => {
+    const blob = new Blob([themeXmlSnippet], { type: 'application/xml;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `tema-blogger-epilketos.xml`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
+
   const handleCopyLink = async () => {
-    try {
-      await navigator.clipboard.writeText(targetUrl);
+    const ok = await copyTextReliable(targetUrl);
+    if (ok) {
       setCopiedLink(true);
       setTimeout(() => setCopiedLink(false), 2500);
-    } catch {
-      // Fallback
     }
   };
 
@@ -363,6 +418,60 @@ export const ShareBloggerModal: React.FC<ShareBloggerModalProps> = ({
               </div>
             </div>
 
+            {/* GLOBAL DOMAIN URL CONFIG (Applies to Embed Code, Theme XML, & BlogThis!) */}
+            {(activeTab === 'embed' || activeTab === 'theme_xml' || activeTab === 'direct' || activeTab === 'preview') && (
+              <div className={`p-3.5 rounded-2xl border space-y-2 ${isUrlUnsafeForBloggerIframe ? 'bg-amber-50/90 border-amber-300' : 'bg-slate-50 border-slate-200/80'}`}>
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <label className="text-xs font-extrabold text-slate-800 flex items-center gap-1.5">
+                    <Globe className="w-3.5 h-3.5 text-orange-600" />
+                    <span>URL Domain Aplikasi Publik (HTTPS):</span>
+                  </label>
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={handleCopyLink}
+                      className="text-[11px] font-bold text-sky-700 hover:text-sky-900 flex items-center gap-1 cursor-pointer"
+                    >
+                      {copiedLink ? <Check className="w-3 h-3" /> : <Copy className="w-3 h-3" />}
+                      <span>{copiedLink ? 'Tautan Tersalin' : 'Salin URL'}</span>
+                    </button>
+                  </div>
+                </div>
+                <div className="flex flex-col sm:flex-row gap-2">
+                  <input
+                    type="url"
+                    value={customUrl}
+                    onChange={(e) => setCustomUrl(e.target.value)}
+                    placeholder={detectedOrigin}
+                    className="flex-1 px-3 py-1.5 rounded-xl border border-slate-300 text-xs text-slate-900 bg-white font-mono focus:ring-2 focus:ring-orange-500/20 focus:border-orange-500 outline-none transition-all placeholder:text-slate-400"
+                  />
+                  {suggestedSharedUrl && customUrl !== suggestedSharedUrl && (
+                    <button
+                      type="button"
+                      onClick={() => setCustomUrl(suggestedSharedUrl)}
+                      className="px-3 py-1.5 rounded-xl bg-amber-600 hover:bg-amber-700 text-white text-xs font-bold transition-colors cursor-pointer whitespace-nowrap"
+                    >
+                      Gunakan Shared App URL
+                    </button>
+                  )}
+                  {customUrl && (
+                    <button
+                      type="button"
+                      onClick={() => setCustomUrl('')}
+                      className="px-2.5 py-1.5 rounded-xl bg-slate-200 hover:bg-slate-300 text-slate-700 text-xs font-bold transition-colors cursor-pointer"
+                    >
+                      Reset URL
+                    </button>
+                  )}
+                </div>
+                {isUrlUnsafeForBloggerIframe && (
+                  <p className="text-[11px] text-amber-900 leading-relaxed">
+                    <strong>Perhatian:</strong> URL saat ini menggunakan alamat pengembangan/lokal (<code>{baseUrl}</code>). Agar tidak muncul <strong>ikon kotak rusak</strong> saat dibuka pengunjung di Blogger, silakan <strong>Publish/Deploy</strong> aplikasi terlebih dahulu dan masukkan alamat HTTPS publiknya di kolom di atas.
+                  </p>
+                )}
+              </div>
+            )}
+
             {/* TAB 1: KODE SEMAT POSTINGAN / GADGET */}
             {activeTab === 'embed' && (
               <div className="space-y-4">
@@ -374,36 +483,6 @@ export const ShareBloggerModal: React.FC<ShareBloggerModalProps> = ({
                     <p className="text-slate-600">
                       Buka dasbor Blogger &rarr; <strong>Postingan Baru</strong> &rarr; klik ikon pensil &rarr; pilih <strong>Tampilan HTML &lt;&gt;</strong> &rarr; Tempel (Paste) kode di bawah.
                     </p>
-                  </div>
-                </div>
-
-                {/* Custom Domain Input Bar */}
-                <div className="p-3.5 rounded-2xl bg-slate-50 border border-slate-200/80 space-y-2">
-                  <div className="flex items-center justify-between">
-                    <label className="text-xs font-extrabold text-slate-800 flex items-center gap-1.5">
-                      <BookOpen className="w-3.5 h-3.5 text-orange-600" />
-                      <span>URL Domain Aplikasi Live (Opsional):</span>
-                    </label>
-                    <span className="text-[10px] text-slate-500 font-medium">
-                      (Blogger HTTPS mewajibkan iframe HTTPS)
-                    </span>
-                  </div>
-                  <div className="flex gap-2">
-                    <input
-                      type="url"
-                      value={customUrl}
-                      onChange={(e) => setCustomUrl(e.target.value)}
-                      placeholder={baseUrl}
-                      className="flex-1 px-3 py-1.5 rounded-xl border border-slate-300 text-xs text-slate-900 bg-white font-mono focus:ring-2 focus:ring-orange-500/20 focus:border-orange-500 outline-none transition-all placeholder:text-slate-400"
-                    />
-                    {customUrl && (
-                      <button
-                        onClick={() => setCustomUrl('')}
-                        className="px-2.5 py-1.5 rounded-xl bg-slate-200 hover:bg-slate-300 text-slate-700 text-xs font-bold transition-colors cursor-pointer"
-                      >
-                        Reset URL
-                      </button>
-                    )}
                   </div>
                 </div>
 
@@ -547,18 +626,29 @@ export const ShareBloggerModal: React.FC<ShareBloggerModalProps> = ({
                 </div>
 
                 <div>
-                  <div className="flex items-center justify-between mb-2">
+                  <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
                     <span className="text-xs font-extrabold uppercase tracking-wider text-purple-900 flex items-center gap-1.5">
                       <Code2 className="w-4 h-4 text-purple-600" />
-                      Kode Template Tema XML (Bebas Error 400 & Bebas Update Gagal):
+                      Kode Template Tema XML (Bebas Error 400 &amp; Bebas Token sb0CZ1):
                     </span>
-                    <button
-                      onClick={handleCopyThemeXml}
-                      className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl bg-purple-700 hover:bg-purple-800 text-white text-xs font-extrabold transition-all shadow-md shadow-purple-700/20 active:scale-95 cursor-pointer"
-                    >
-                      {copiedThemeXml ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
-                      <span>{copiedThemeXml ? 'XML Tema Tersalin!' : 'Salin Template Tema XML'}</span>
-                    </button>
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={handleDownloadThemeXml}
+                        className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-extrabold transition-all shadow-md shadow-emerald-600/20 active:scale-95 cursor-pointer"
+                      >
+                        <Download className="w-3.5 h-3.5" />
+                        <span>Unduh File .xml</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={handleCopyThemeXml}
+                        className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl bg-purple-700 hover:bg-purple-800 text-white text-xs font-extrabold transition-all shadow-md shadow-purple-700/20 active:scale-95 cursor-pointer"
+                      >
+                        {copiedThemeXml ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
+                        <span>{copiedThemeXml ? 'XML Tema Tersalin!' : 'Salin Template Tema XML'}</span>
+                      </button>
+                    </div>
                   </div>
 
                   <div className="relative">
@@ -569,12 +659,10 @@ export const ShareBloggerModal: React.FC<ShareBloggerModalProps> = ({
                 </div>
 
                 <div className="p-3.5 rounded-2xl bg-slate-100 border border-slate-200 text-xs text-slate-700">
-                  <strong className="text-slate-900 block mb-1">Langkah Memasang Template Tema (Bebas Update Gagal):</strong>
+                  <strong className="text-slate-900 block mb-1">2 Cara Memasang Template Tema di Blogger (Pilih Salah Satu):</strong>
                   <ol className="list-decimal list-inside space-y-1 text-slate-600">
-                    <li>Buka menu <strong className="text-slate-900">Tema (Theme)</strong> di Blogger.</li>
-                    <li>Klik tanda panah ke bawah (dropdown) di sebelah tombol &ldquo;Sesuaikan&rdquo; &rarr; pilih <strong className="text-slate-900">Edit HTML</strong>.</li>
-                    <li><strong>PENTING:</strong> Tekan <code>Ctrl + A</code> lalu <code>Backspace/Delete</code> untuk <strong>menghapus seluruh kode lama</strong> sampai kosong bersih.</li>
-                    <li>Tempelkan (Paste) seluruh kode XML di atas, lalu klik tombol <strong className="text-purple-700">Simpan (Ikon Disket)</strong> di pojok kanan atas.</li>
+                    <li><strong>Cara Paling Aman (Upload XML):</strong> Klik tombol hijau <strong>Unduh File .xml</strong> di atas &rarr; buka menu <strong>Tema</strong> di Blogger &rarr; klik panah dropdown di sebelah &ldquo;Sesuaikan&rdquo; &rarr; pilih <strong>Pulihkan (Restore)</strong> &rarr; klik <strong>Upload</strong> file <code>.xml</code> tersebut.</li>
+                    <li><strong>Cara Copy-Paste (Edit HTML):</strong> Buka menu <strong>Tema</strong> &rarr; <strong>Edit HTML</strong> &rarr; tekan <code>Ctrl + A</code> lalu <code>Backspace/Delete</code> sampai kosong &rarr; Paste kode XML di atas &rarr; klik ikon <strong>Simpan (Disket)</strong>.</li>
                   </ol>
                 </div>
               </div>
@@ -813,11 +901,33 @@ export const ShareBloggerModal: React.FC<ShareBloggerModalProps> = ({
             {/* TAB 5: SIMULASI TAMPILAN BLOG */}
             {activeTab === 'preview' && (
               <div className="space-y-4">
-                <div className="p-3 rounded-2xl bg-amber-500/10 border border-amber-300/40 text-amber-900 text-xs flex items-center gap-2">
-                  <Sparkles className="w-4 h-4 text-amber-600 shrink-0" />
-                  <span>
-                    Simulasi pratinjau memperlihatkan bagaimana widget E-Pilketos akan muncul saat dipasang di halaman situs Blogger sekolah:
-                  </span>
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 p-3 rounded-2xl bg-amber-500/10 border border-amber-300/40 text-amber-900 text-xs">
+                  <div className="flex items-center gap-2">
+                    <Sparkles className="w-4 h-4 text-amber-600 shrink-0" />
+                    <span>
+                      Simulasi pratinjau bagaimana aplikasi tampil di halaman Blogger sekolah:
+                    </span>
+                  </div>
+                  <div className="flex gap-1 bg-white/80 p-1 rounded-xl border border-amber-200 shrink-0">
+                    <button
+                      type="button"
+                      onClick={() => setLivePreviewMode('mockup')}
+                      className={`px-2.5 py-1 rounded-lg font-bold transition-colors cursor-pointer ${
+                        livePreviewMode === 'mockup' ? 'bg-slate-900 text-white' : 'text-slate-600 hover:bg-slate-100'
+                      }`}
+                    >
+                      Mockup
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setLivePreviewMode('live')}
+                      className={`px-2.5 py-1 rounded-lg font-bold transition-colors cursor-pointer ${
+                        livePreviewMode === 'live' ? 'bg-emerald-600 text-white' : 'text-slate-600 hover:bg-slate-100'
+                      }`}
+                    >
+                      Uji Iframe Langsung
+                    </button>
+                  </div>
                 </div>
 
                 {/* Mocked Blogger Blog Container */}
@@ -830,11 +940,11 @@ export const ShareBloggerModal: React.FC<ShareBloggerModalProps> = ({
                         <span className="w-2.5 h-2.5 rounded-full bg-amber-400"></span>
                         <span className="w-2.5 h-2.5 rounded-full bg-emerald-400"></span>
                       </div>
-                      <span className="font-mono text-[11px] text-slate-500 bg-white px-3 py-1 rounded-md border border-slate-200">
-                        https://smpn1teladan.blogspot.com/pilketos-live
+                      <span className="font-mono text-[11px] text-slate-500 bg-white px-3 py-1 rounded-md border border-slate-200 truncate max-w-[240px] sm:max-w-xs">
+                        https://{(schoolName || 'sekolah').toLowerCase().replace(/[^a-z0-9]/g, '')}.blogspot.com/pilketos-live
                       </span>
                     </div>
-                    <span className="text-[10px] font-bold text-orange-600 uppercase flex items-center gap-1">
+                    <span className="text-[10px] font-bold text-orange-600 uppercase flex items-center gap-1 shrink-0">
                       <BloggerIcon size={12} /> Blogger Preview
                     </span>
                   </div>
@@ -846,29 +956,38 @@ export const ShareBloggerModal: React.FC<ShareBloggerModalProps> = ({
                         {postTitle}
                       </h2>
                       <p className="text-[11px] text-slate-500">
-                        Diposting oleh Humas Sekolah · {new Date().toLocaleDateString('id-ID')}
+                        Diposting oleh Humas {schoolName} · {new Date().toLocaleDateString('id-ID')}
                       </p>
                     </div>
 
                     {/* Embedded Frame Preview */}
                     <div className="rounded-xl overflow-hidden border border-slate-300 bg-white shadow-md">
                       <div className="p-2.5 bg-slate-900 text-white text-[11px] font-bold flex items-center justify-between">
-                        <span>🗳️ E-Pilketos Digital · ${schoolName}</span>
+                        <span>🗳️ E-Pilketos Digital · {schoolName}</span>
                         <span className="text-emerald-400">● Live Terhubung</span>
                       </div>
-                      <div className="p-6 text-center space-y-3 bg-gradient-to-b from-sky-50 to-white min-h-[160px] flex flex-col items-center justify-center">
-                        <div className="w-10 h-10 rounded-xl bg-sky-500/10 text-sky-600 flex items-center justify-center">
-                          {selectedView === 'PUBLIC' ? <BarChart3 className="w-5 h-5" /> : <Vote className="w-5 h-5" />}
+                      {livePreviewMode === 'live' ? (
+                        <iframe
+                          src={targetUrl}
+                          title={`Live Preview E-Pilketos ${schoolName}`}
+                          className="w-full h-[380px] border-0 bg-white"
+                          allow="clipboard-write; fullscreen"
+                        />
+                      ) : (
+                        <div className="p-6 text-center space-y-3 bg-gradient-to-b from-sky-50 to-white min-h-[160px] flex flex-col items-center justify-center">
+                          <div className="w-10 h-10 rounded-xl bg-sky-500/10 text-sky-600 flex items-center justify-center">
+                            {selectedView === 'PUBLIC' ? <BarChart3 className="w-5 h-5" /> : <Vote className="w-5 h-5" />}
+                          </div>
+                          <div>
+                            <p className="text-xs font-black text-slate-900">
+                              Pratinjau Widget {selectedView === 'PUBLIC' ? 'Quick Count' : 'Bilik Suara'} Aktif
+                            </p>
+                            <p className="text-[11px] text-slate-500 max-w-sm mt-0.5">
+                              Konten aplikasi dimuat secara interaktif dan responsif di Blogger dengan tinggi {selectedHeight}.
+                            </p>
+                          </div>
                         </div>
-                        <div>
-                          <p className="text-xs font-black text-slate-900">
-                            Pratinjau Widget {selectedView === 'PUBLIC' ? 'Quick Count' : 'Bilik Suara'} Aktif
-                          </p>
-                          <p className="text-[11px] text-slate-500 max-w-sm mt-0.5">
-                            Konten aplikasi dimuat secara interaktif dan responsif di Blogger dengan tinggi {selectedHeight}.
-                          </p>
-                        </div>
-                      </div>
+                      )}
                     </div>
                   </div>
                 </div>
