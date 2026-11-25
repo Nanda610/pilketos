@@ -229,6 +229,41 @@ const ACCOUNT_MUTATING_ACTIONS = new Set([
   'STATE_MUTATION',
 ]);
 
+export function mergeSkConfigsByPeriod(
+  existing?: Record<string, import('../types').SkDocumentConfig>,
+  incoming?: Record<string, import('../types').SkDocumentConfig>,
+  validPeriodIds?: Set<string>,
+  preferIncomingOnTie: boolean = true
+): Record<string, import('../types').SkDocumentConfig> | undefined {
+  if (!existing && !incoming) return undefined;
+  const merged: Record<string, import('../types').SkDocumentConfig> = {};
+  const allPeriodIds = new Set<string>([
+    ...Object.keys(existing || {}),
+    ...Object.keys(incoming || {}),
+  ]);
+
+  for (const periodId of allPeriodIds) {
+    if (validPeriodIds && !validPeriodIds.has(periodId)) continue;
+    const prevCfg = existing?.[periodId];
+    const nextCfg = incoming?.[periodId];
+    if (!prevCfg && nextCfg) {
+      merged[periodId] = nextCfg;
+    } else if (prevCfg && !nextCfg) {
+      merged[periodId] = prevCfg;
+    } else if (prevCfg && nextCfg) {
+      const prevTime = Date.parse(prevCfg.updatedAt || '') || 0;
+      const nextTime = Date.parse(nextCfg.updatedAt || '') || 0;
+      if (nextTime > prevTime || (preferIncomingOnTie && nextTime === prevTime)) {
+        merged[periodId] = nextCfg;
+      } else {
+        merged[periodId] = prevCfg;
+      }
+    }
+  }
+
+  return Object.keys(merged).length > 0 ? merged : existing ?? incoming;
+}
+
 export function applyAuthoritativeStateUpdate({
   current,
   incoming,
@@ -394,9 +429,31 @@ export function applyAuthoritativeStateUpdate({
     SCHOOL_MUTATING_ACTIONS.has(action) ||
     (action === 'RESTORE_CLIENT_STATE' && isUninitializedDefaultSnapshot(current));
 
-  const nextSchool: SchoolConfig = canUpdateSchool && incoming.school
-    ? { ...current.school, ...incoming.school }
-    : current.school;
+  const mergedSkConfigs =
+    action === 'RESET_DATA_DEMO'
+      ? incoming.school?.skConfigsByPeriod
+      : mergeSkConfigsByPeriod(
+          current.school?.skConfigsByPeriod,
+          incoming.school?.skConfigsByPeriod,
+          validPeriodIds,
+          canUpdateSchool
+        );
+
+  const nextSchool: SchoolConfig =
+    action === 'RESET_DATA_DEMO' && incoming.school
+      ? incoming.school
+      : canUpdateSchool && incoming.school
+      ? {
+          ...current.school,
+          ...incoming.school,
+          ...(mergedSkConfigs !== undefined ? { skConfigsByPeriod: mergedSkConfigs } : {}),
+        }
+      : mergedSkConfigs !== undefined
+      ? {
+          ...current.school,
+          skConfigsByPeriod: mergedSkConfigs,
+        }
+      : current.school;
 
   // Preserve Admin's updated accounts/passwords unless an account-mutating action is running
   const canReplaceAccounts =

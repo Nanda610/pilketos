@@ -401,3 +401,115 @@ test('HAPUS_PERIODE only tombstones entities inside the deleted period and prese
   assert.equal(merged.tombstones?.voters?.includes('voter_concurrent_active') || false, false);
 });
 
+test('skConfigsByPeriod deep-merges per period by newest updatedAt and ignores older stale overwrites', () => {
+  const base = makeBaseSnapshot();
+  const periodA = base.periods[0].id;
+  const periodB = base.periods[1].id;
+
+  const cfgA_old = {
+    skNumber: '001/OLD',
+    skDate: '2026-09-01',
+    skCity: 'Jakarta',
+    kopBarLine1: 'PEMDA LAMA',
+    kopBarLine2: 'DINAS LAMA',
+    showKopLine2: true,
+    schoolCustomName: 'SMP TEST',
+    schoolAddressText: 'Jl. Test',
+    schoolPostalCode: '10000',
+    schoolPhoneText: '021',
+    schoolEmailText: 'a@test.sch.id',
+    schoolWebsiteText: 'https://test.sch.id',
+    schoolNpsnText: '12345',
+    principalName: 'Kepsek A',
+    principalNip: '111',
+    principalRank: 'IV/a',
+    supervisorName: 'Pembina A',
+    supervisorRole: 'Pembina',
+    supervisorNip: '222',
+    eventName: 'Acara Lama',
+    eventTheme: 'Tema Lama',
+    academicYear: '2026/2027',
+    eventDateText: 'Senin',
+    eventTimeText: '08.00',
+    eventLocation: 'Aula',
+    menimbangList: ['Menimbang lama'],
+    mengingatList: ['Mengingat lama'],
+    memperhatikanText: 'Memperhatikan lama',
+    diktumMenetapkan: 'Menetapkan lama',
+    diktumKesatu: 'Kesatu lama',
+    diktumKedua: 'Kedua lama',
+    diktumKetiga: 'Ketiga lama',
+    diktumKeempat: 'Keempat lama',
+    pages: [],
+    showQrCode: true,
+    showStamp: true,
+    showWatermark: false,
+    updatedAt: '2026-10-01T08:00:00.000Z',
+  };
+
+  const cfgA_new = {
+    ...cfgA_old,
+    eventTheme: 'Tema Baru Permanen',
+    diktumMenetapkan: 'Menetapkan Terbaru',
+    updatedAt: '2026-10-02T10:00:00.000Z',
+  };
+
+  const cfgB = {
+    ...cfgA_old,
+    skNumber: '002/PERIODE-B',
+    kopBarLine1: 'YAYASAN PERIODE B',
+    updatedAt: '2026-10-02T09:00:00.000Z',
+  };
+
+  // Client 1 saves Period A (new) onto state that already had Period B
+  const withBoth = applyAuthoritativeStateUpdate({
+    current: {
+      ...base,
+      school: {
+        ...base.school,
+        skConfigsByPeriod: {
+          [periodB]: cfgB,
+        },
+      },
+    },
+    incoming: {
+      revision: 11,
+      school: {
+        ...base.school,
+        kopBarLine1: 'PEMDA BARU',
+        skConfigsByPeriod: {
+          [periodA]: cfgA_new,
+        },
+      },
+    },
+    updatedBy: 'Admin Sekolah',
+    lastAction: 'SYNC_UPDATE',
+    defaultAccounts: INITIAL_ACCOUNTS,
+  });
+
+  assert.equal(withBoth.school.skConfigsByPeriod?.[periodA]?.eventTheme, 'Tema Baru Permanen');
+  assert.equal(withBoth.school.skConfigsByPeriod?.[periodB]?.skNumber, '002/PERIODE-B');
+
+  // Stale client sends RESTORE_CLIENT_STATE / UPDATE_PANITIA with cfgA_old -> newer cfgA_new must survive!
+  const afterStale = applyAuthoritativeStateUpdate({
+    current: withBoth,
+    incoming: {
+      revision: 10,
+      school: {
+        ...base.school,
+        skConfigsByPeriod: {
+          [periodA]: cfgA_old,
+        },
+      },
+    },
+    updatedBy: 'Panitia',
+    lastAction: 'UPDATE_PANITIA',
+    defaultAccounts: INITIAL_ACCOUNTS,
+  });
+
+  assert.equal(afterStale.school.skConfigsByPeriod?.[periodA]?.eventTheme, 'Tema Baru Permanen');
+  assert.equal(afterStale.school.skConfigsByPeriod?.[periodA]?.diktumMenetapkan, 'Menetapkan Terbaru');
+  assert.equal(afterStale.school.skConfigsByPeriod?.[periodB]?.skNumber, '002/PERIODE-B');
+});
+
+

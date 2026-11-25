@@ -11,10 +11,19 @@
 import React, { useState, useEffect } from 'react';
 import { createPortal } from 'react-dom';
 import { SchoolConfig, ElectionSummary, CommitteeMember } from '../types';
-import { Printer, X, ShieldCheck, Eye, ZoomIn, ZoomOut, Check, Sliders, FileText, Maximize2, Minimize2 } from 'lucide-react';
+import { Printer, X, ShieldCheck, Eye, ZoomIn, ZoomOut, Check, Sliders, FileText, Maximize2, Minimize2, Edit3, Save, CheckCircle2 } from 'lucide-react';
 import { SchoolCrestLogo } from './CandidateAvatar';
 import { clampZoomScale, formatOfficialBahpNumber } from '../utils/printIsolation';
 import { getTabulationLeaderInfo } from '../lib/tabulation';
+import { electionStore } from '../lib/store';
+import { saveFormDraft, loadFormDraft, clearFormDraft } from '../lib/formDrafts';
+
+interface BahpKopDraft {
+  isEditingKop: boolean;
+  kopLine1Draft: string;
+  kopLine2Draft: string;
+  showKopLine2Draft: boolean;
+}
 
 interface PrintBeritaAcaraProps {
   school: SchoolConfig;
@@ -32,6 +41,8 @@ export const PrintBeritaAcara: React.FC<PrintBeritaAcaraProps> = ({
   onClose,
 }) => {
   const { period, totalVoters, totalVoted, totalUnvoted, participationPercentage, candidatesResults } = summary;
+  const bahpDraftKey = `bahp_kop_draft_${period.id}`;
+  const [initialBahpDraft] = useState(() => loadFormDraft<BahpKopDraft>(bahpDraftKey));
 
   // Interactive Document Preview Options State
   const [zoomScale, setZoomScale] = useState<number>(100);
@@ -40,6 +51,115 @@ export const PrintBeritaAcara: React.FC<PrintBeritaAcaraProps> = ({
   const [showQrCode, setShowQrCode] = useState<boolean>(true);
   const [showSettingsPanel, setShowSettingsPanel] = useState<boolean>(false);
   const [onlyDocumentMode, setOnlyDocumentMode] = useState<boolean>(false);
+
+  // Editable Kop Surat (Baris 1 & Baris 2) State + Persistent Save
+  const periodSkConfig = school.skConfigsByPeriod?.[period.id];
+  const defaultKopLine1 =
+    school.kopBarLine1 !== undefined
+      ? school.kopBarLine1
+      : periodSkConfig?.kopBarLine1 !== undefined
+      ? periodSkConfig.kopBarLine1
+      : school.province
+      ? `PEMERINTAH PROVINSI ${school.province.toUpperCase()}`
+      : 'PEMERINTAH PROVINSI DKI JAKARTA';
+  const defaultKopLine2 =
+    school.kopBarLine2 !== undefined
+      ? school.kopBarLine2
+      : periodSkConfig?.kopBarLine2 !== undefined
+      ? periodSkConfig.kopBarLine2
+      : 'DINAS PENDIDIKAN DAN KEBUDAYAAN';
+  const defaultShowKopLine2 =
+    school.showKopLine2 !== undefined
+      ? school.showKopLine2
+      : periodSkConfig?.showKopLine2 !== undefined
+      ? periodSkConfig.showKopLine2
+      : true;
+
+  const [kopBarLine1, setKopBarLine1] = useState<string>(defaultKopLine1);
+  const [kopBarLine2, setKopBarLine2] = useState<string>(defaultKopLine2);
+  const [showKopLine2, setShowKopLine2] = useState<boolean>(defaultShowKopLine2);
+  const [isEditingKop, setIsEditingKop] = useState<boolean>(
+    () => Boolean(initialBahpDraft?.data?.isEditingKop)
+  );
+  const [kopLine1Draft, setKopLine1Draft] = useState<string>(
+    () => initialBahpDraft?.data?.kopLine1Draft ?? defaultKopLine1
+  );
+  const [kopLine2Draft, setKopLine2Draft] = useState<string>(
+    () => initialBahpDraft?.data?.kopLine2Draft ?? defaultKopLine2
+  );
+  const [showKopLine2Draft, setShowKopLine2Draft] = useState<boolean>(
+    () => initialBahpDraft?.data?.showKopLine2Draft ?? defaultShowKopLine2
+  );
+  const [saveToast, setSaveToast] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!isEditingKop) {
+      setKopBarLine1(defaultKopLine1);
+      setKopBarLine2(defaultKopLine2);
+      setShowKopLine2(defaultShowKopLine2);
+    }
+  }, [defaultKopLine1, defaultKopLine2, defaultShowKopLine2, isEditingKop]);
+
+  useEffect(() => {
+    if (isEditingKop) {
+      saveFormDraft<BahpKopDraft>(bahpDraftKey, {
+        isEditingKop: true,
+        kopLine1Draft,
+        kopLine2Draft,
+        showKopLine2Draft,
+      });
+    }
+  }, [bahpDraftKey, isEditingKop, kopLine1Draft, kopLine2Draft, showKopLine2Draft]);
+
+  const handleStartEditKop = () => {
+    setKopLine1Draft(kopBarLine1);
+    setKopLine2Draft(kopBarLine2);
+    setShowKopLine2Draft(showKopLine2);
+    setIsEditingKop(true);
+  };
+
+  const handleCancelEditKop = () => {
+    clearFormDraft(bahpDraftKey);
+    setIsEditingKop(false);
+    setKopLine1Draft(kopBarLine1);
+    setKopLine2Draft(kopBarLine2);
+    setShowKopLine2Draft(showKopLine2);
+  };
+
+  const handleSaveKop = () => {
+    const cleanLine1 = kopLine1Draft.trim();
+    const cleanLine2 = kopLine2Draft.trim();
+    setKopBarLine1(cleanLine1);
+    setKopBarLine2(cleanLine2);
+    setShowKopLine2(showKopLine2Draft);
+    setIsEditingKop(false);
+    clearFormDraft(bahpDraftKey);
+
+    const latestSchool = electionStore.getSchool();
+    const existingSk = latestSchool.skConfigsByPeriod?.[period.id];
+    const nowIso = new Date(electionStore.getAppTimeMs()).toISOString();
+    electionStore.updateSchool({
+      kopBarLine1: cleanLine1,
+      kopBarLine2: cleanLine2,
+      showKopLine2: showKopLine2Draft,
+      ...(existingSk
+        ? {
+            skConfigsByPeriod: {
+              ...(latestSchool.skConfigsByPeriod || {}),
+              [period.id]: {
+                ...existingSk,
+                kopBarLine1: cleanLine1,
+                kopBarLine2: cleanLine2,
+                showKopLine2: showKopLine2Draft,
+                updatedAt: nowIso,
+              },
+            },
+          }
+        : {}),
+    });
+    setSaveToast('Kop Surat Berita Acara berhasil disimpan permanen & tersinkronisasi!');
+    setTimeout(() => setSaveToast(null), 3500);
+  };
 
   useEffect(() => {
     document.body.classList.add('print-preview-open');
@@ -75,6 +195,13 @@ export const PrintBeritaAcara: React.FC<PrintBeritaAcaraProps> = ({
 
   return createPortal(
     <div className="print-portal-root fixed inset-0 z-[9999] overflow-y-auto bg-slate-200 p-2 sm:p-4 md:p-8 print:p-0 print:m-0 print:bg-white print:overflow-visible">
+      {/* Save Confirmation Toast */}
+      {saveToast && (
+        <output className="no-print fixed top-5 left-1/2 -translate-x-1/2 z-[10001] bg-emerald-600 text-white px-5 py-2.5 rounded-2xl shadow-xl flex items-center gap-2 text-xs font-bold animate-in fade-in">
+          <CheckCircle2 className="w-4 h-4 shrink-0" />
+          <span>{saveToast}</span>
+        </output>
+      )}
       {/* Floating Mini Restore Bar when in "Hanya Dokumen" full preview mode */}
       {onlyDocumentMode && (
         <div className="no-print fixed top-4 right-4 z-[10000] flex items-center gap-2 bg-slate-900/90 text-white px-3.5 py-2 rounded-2xl shadow-xl border border-white/20 backdrop-blur-md">
@@ -291,15 +418,148 @@ export const PrintBeritaAcara: React.FC<PrintBeritaAcaraProps> = ({
             <div className="w-20 flex-shrink-0 flex justify-center">
               <SchoolCrestLogo size={64} type={school.type} logoUrl={school.logoUrl} />
             </div>
-            <div className="flex-1 px-4">
-              {school.province && (
-                <p className="text-xs uppercase font-sans tracking-widest text-slate-600 font-semibold">
-                  PEMERINTAH PROVINSI {school.province.toUpperCase()}
-                </p>
+            <div className="flex-1 px-4 relative group/kop">
+              {isEditingKop ? (
+                <>
+                  <div className="hidden print:block">
+                    {kopLine1Draft.trim() && (
+                      <p className="text-xs uppercase font-sans tracking-widest text-slate-600 font-semibold">
+                        {kopLine1Draft.trim()}
+                      </p>
+                    )}
+                    {showKopLine2Draft && kopLine2Draft.trim() && (
+                      <p className="text-xs uppercase font-sans tracking-widest text-slate-600 font-semibold">
+                        {kopLine2Draft.trim()}
+                      </p>
+                    )}
+                  </div>
+                  <div className="no-print mb-2 p-3 rounded-xl bg-sky-50/90 border border-sky-300 shadow-sm text-left font-sans space-y-2">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-[11px] font-bold uppercase tracking-wider text-sky-900 flex items-center gap-1.5">
+                        <Edit3 className="w-3.5 h-3.5 text-sky-600" />
+                        <span>Edit &amp; Simpan Kop Surat</span>
+                      </span>
+                      <div className="flex items-center gap-1.5">
+                        <button
+                          type="button"
+                          onClick={handleCancelEditKop}
+                          className="px-2.5 py-1 rounded-lg bg-white hover:bg-slate-100 text-slate-700 border border-slate-300 text-[11px] font-semibold cursor-pointer transition-colors"
+                        >
+                          Batal
+                        </button>
+                        <button
+                          type="button"
+                          onClick={handleSaveKop}
+                          className="inline-flex items-center gap-1 px-3 py-1 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-[11px] font-bold shadow-xs cursor-pointer transition-colors"
+                        >
+                          <Save className="w-3 h-3" />
+                          <span>Simpan</span>
+                        </button>
+                      </div>
+                    </div>
+
+                    <div className="space-y-1.5">
+                      <div>
+                        <label className="block text-[10px] font-bold uppercase tracking-wider text-slate-600 mb-0.5">
+                          Baris 1 Kop (Pemerintah / Kementerian / Yayasan)
+                        </label>
+                        <input
+                          type="text"
+                          value={kopLine1Draft}
+                          onChange={(e) => setKopLine1Draft(e.target.value)}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter') {
+                              e.preventDefault();
+                              handleSaveKop();
+                            } else if (e.key === 'Escape') {
+                              e.preventDefault();
+                              handleCancelEditKop();
+                            }
+                          }}
+                          placeholder="Contoh: PEMERINTAH PROVINSI DKI JAKARTA"
+                          aria-label="Edit Baris 1 Kop Surat"
+                          autoFocus
+                          className="w-full px-2.5 py-1.5 text-xs rounded-lg border border-sky-300 bg-white text-slate-900 font-bold uppercase focus:outline-none focus:ring-2 focus:ring-sky-500/40"
+                        />
+                      </div>
+
+                      <div>
+                        <div className="flex items-center justify-between mb-0.5">
+                          <label className="block text-[10px] font-bold uppercase tracking-wider text-slate-600">
+                            Baris 2 Kop (Dinas / Instansi)
+                          </label>
+                          <label className="inline-flex items-center gap-1 text-[10px] font-semibold text-slate-600 cursor-pointer">
+                            <input
+                              type="checkbox"
+                              checked={showKopLine2Draft}
+                              onChange={(e) => setShowKopLine2Draft(e.target.checked)}
+                              className="rounded text-sky-600 focus:ring-sky-500 cursor-pointer"
+                            />
+                            <span>Tampilkan Baris 2</span>
+                          </label>
+                        </div>
+                        {showKopLine2Draft && (
+                          <input
+                            type="text"
+                            value={kopLine2Draft}
+                            onChange={(e) => setKopLine2Draft(e.target.value)}
+                            onKeyDown={(e) => {
+                              if (e.key === 'Enter') {
+                                e.preventDefault();
+                                handleSaveKop();
+                              } else if (e.key === 'Escape') {
+                                e.preventDefault();
+                                handleCancelEditKop();
+                              }
+                            }}
+                            placeholder="Contoh: DINAS PENDIDIKAN DAN KEBUDAYAAN"
+                            aria-label="Edit Baris 2 Kop Surat"
+                            className="w-full px-2.5 py-1.5 text-xs rounded-lg border border-sky-300 bg-white text-slate-900 font-bold uppercase focus:outline-none focus:ring-2 focus:ring-sky-500/40"
+                          />
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                </>
+              ) : (
+                <>
+                  <div className="no-print flex items-center justify-center gap-1.5 mb-1 opacity-75 group-hover/kop:opacity-100 transition-opacity">
+                    <button
+                      type="button"
+                      onClick={handleStartEditKop}
+                      className="inline-flex items-center gap-1 px-2.5 py-0.5 text-[10px] font-bold text-sky-800 bg-sky-50 hover:bg-sky-100 border border-sky-200 rounded-md shadow-2xs transition-colors cursor-pointer"
+                      title="Edit & Simpan Baris 1 dan Baris 2 Kop Surat"
+                    >
+                      <Edit3 className="w-2.5 h-2.5 text-sky-600" />
+                      <span>Edit &amp; Simpan Kop</span>
+                    </button>
+                  </div>
+                  <p
+                    onClick={handleStartEditKop}
+                    className="text-xs uppercase font-sans tracking-widest text-slate-600 font-semibold cursor-pointer hover:bg-sky-50 hover:text-sky-900 px-1.5 py-0.5 rounded transition-colors print:p-0 print:bg-transparent"
+                    title="Klik untuk mengedit Baris 1 Kop Surat"
+                  >
+                    {kopBarLine1 || (
+                      <span className="no-print text-slate-400 italic font-normal">
+                        (Klik untuk isi Baris 1 Kop)
+                      </span>
+                    )}
+                  </p>
+                  {showKopLine2 && (
+                    <p
+                      onClick={handleStartEditKop}
+                      className="text-xs uppercase font-sans tracking-widest text-slate-600 font-semibold cursor-pointer hover:bg-sky-50 hover:text-sky-900 px-1.5 py-0.5 rounded transition-colors print:p-0 print:bg-transparent"
+                      title="Klik untuk mengedit Baris 2 Kop Surat"
+                    >
+                      {kopBarLine2 || (
+                        <span className="no-print text-slate-400 italic font-normal">
+                          (Klik untuk isi Baris 2 Kop)
+                        </span>
+                      )}
+                    </p>
+                  )}
+                </>
               )}
-              <p className="text-xs uppercase font-sans tracking-widest text-slate-600 font-semibold">
-                DINAS PENDIDIKAN DAN KEBUDAYAAN
-              </p>
               <h1 className="text-xl md:text-2xl font-bold font-sans uppercase tracking-tight text-slate-900 mt-0.5">
                 {school.name}
               </h1>

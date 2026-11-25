@@ -28,6 +28,9 @@ export interface SchoolConfig {
   openingVideoTitle?: string;
   openingVideoEnabled?: boolean;
   email?: string;
+  kopBarLine1?: string;
+  kopBarLine2?: string;
+  showKopLine2?: boolean;
   kopLogoConfig?: {
     schoolLogoWidth: number;
     schoolLogoHeight: number;
@@ -51,6 +54,57 @@ export interface SchoolConfig {
     signatoryTitle: string;
     savedAt?: string;
   };
+  skConfigsByPeriod?: Record<string, SkDocumentConfig>;
+}
+
+export interface SkPageConfigSnapshot {
+  id: string;
+  pageNumber: number;
+  type: 'main_sk' | 'appendix_members' | 'appendix_duties' | 'appendix_rules' | 'appendix_integrity' | 'custom';
+  title: string;
+  subtitle: string;
+  customContent?: string;
+}
+
+export interface SkDocumentConfig {
+  skNumber: string;
+  skDate: string;
+  skCity: string;
+  kopBarLine1: string;
+  kopBarLine2: string;
+  showKopLine2: boolean;
+  schoolCustomName: string;
+  schoolAddressText: string;
+  schoolPostalCode: string;
+  schoolPhoneText: string;
+  schoolEmailText: string;
+  schoolWebsiteText: string;
+  schoolNpsnText: string;
+  principalName: string;
+  principalNip: string;
+  principalRank: string;
+  supervisorName: string;
+  supervisorRole: string;
+  supervisorNip: string;
+  eventName: string;
+  eventTheme: string;
+  academicYear: string;
+  eventDateText: string;
+  eventTimeText: string;
+  eventLocation: string;
+  menimbangList: string[];
+  mengingatList: string[];
+  memperhatikanText: string;
+  diktumMenetapkan: string;
+  diktumKesatu: string;
+  diktumKedua: string;
+  diktumKetiga: string;
+  diktumKeempat: string;
+  pages: SkPageConfigSnapshot[];
+  showQrCode: boolean;
+  showStamp: boolean;
+  showWatermark: boolean;
+  updatedAt: string;
 }
 
 export interface ElectionPeriod {
@@ -75,6 +129,7 @@ export interface CommitteeMember {
   memberName: string;
   role: 'Ketua Panitia' | 'Sekretaris' | 'Bendahara' | 'Koordinator IT & Bilik' | 'Seksi Logistik' | 'Pengawas / Saksi';
   className?: string;
+  duties?: string;
   email: string;
 }
 

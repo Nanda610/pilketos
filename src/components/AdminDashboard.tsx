@@ -233,15 +233,24 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
 
   const handleSaveSchool = (e: React.FormEvent) => {
     e.preventDefault();
+    const latestSchool = electionStore.getSchool();
     const cleanForm: SchoolConfig = {
+      ...latestSchool,
       ...schoolForm,
-      name: schoolForm.name.trim() || school.name || 'SMP ISLAM YASPAI',
+      name: schoolForm.name.trim() || latestSchool.name || 'SMP ISLAM YASPAI',
       type: schoolForm.type || 'OSIS',
       npsn: schoolForm.npsn.trim(),
       address: schoolForm.address.trim(),
       city: schoolForm.city.trim(),
       province: schoolForm.province.trim(),
       principalName: schoolForm.principalName.trim(),
+      // Preserve document text & layout customizations saved in SK Panitia / BAHP modals
+      kopBarLine1: latestSchool.kopBarLine1 ?? schoolForm.kopBarLine1,
+      kopBarLine2: latestSchool.kopBarLine2 ?? schoolForm.kopBarLine2,
+      showKopLine2: latestSchool.showKopLine2 ?? schoolForm.showKopLine2,
+      skConfigsByPeriod: latestSchool.skConfigsByPeriod ?? schoolForm.skConfigsByPeriod,
+      kopLogoConfig: latestSchool.kopLogoConfig ?? schoolForm.kopLogoConfig,
+      stampConfig: latestSchool.stampConfig ?? schoolForm.stampConfig,
     };
     setSchoolForm(cleanForm);
     setIsSchoolFormEdited(false);

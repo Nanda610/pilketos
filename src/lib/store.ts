@@ -82,11 +82,21 @@ export class ElectionStore {
   private lastSyncedAt: string | null = null;
   private isApplyingRemoteState: boolean = false;
   private hasPendingLocalSync: boolean = false;
+  private pendingSchoolMutation: boolean = false;
   private isHttpPushInFlight: boolean = false;
   private latestLocalMutationRevision: number = 0;
   private queuedPushQueue: Array<{ updatedBy: string; lastAction: string }> = [];
+  private batchDepth: number = 0;
+  private batchDirtyActions: Set<string> = new Set();
   private wasExplicitlyResetByServer: boolean = false;
   private pendingForceResync: boolean = false;
+
+  private static readonly SCHOOL_MUTATING_LOCAL_ACTIONS = new Set([
+    'UPDATE_KONFIGURASI_SEKOLAH',
+    'SYNC_UPDATE',
+    'RESET_DATA_DEMO',
+    'RESTORE_CLIENT_STATE',
+  ]);
 
   private ws: WebSocket | null = null;
   private broadcastChannel: BroadcastChannel | null = null;
@@ -123,8 +133,36 @@ export class ElectionStore {
     this.listeners.forEach((fn) => fn());
   }
 
+  public runBatch<T>(
+    fn: () => T,
+    updatedBy: string = 'Admin Sekolah',
+    lastAction: string = 'SYNC_UPDATE'
+  ): T {
+    this.batchDepth += 1;
+    let result: T;
+    try {
+      result = fn();
+    } finally {
+      this.batchDepth -= 1;
+    }
+    if (this.batchDepth === 0 && this.batchDirtyActions.size > 0) {
+      const actionToUse =
+        this.batchDirtyActions.size === 1 ? Array.from(this.batchDirtyActions)[0] : lastAction;
+      this.batchDirtyActions.clear();
+      this.notify(updatedBy, actionToUse);
+    }
+    return result;
+  }
+
   private notify(updatedBy: string = 'Admin Sekolah', lastAction: string = 'UPDATE_DATA') {
     if (!this.isApplyingRemoteState) {
+      if (ElectionStore.SCHOOL_MUTATING_LOCAL_ACTIONS.has(lastAction)) {
+        this.pendingSchoolMutation = true;
+      }
+      if (this.batchDepth > 0) {
+        this.batchDirtyActions.add(lastAction);
+        return;
+      }
       this.revision += 1;
       this.latestLocalMutationRevision = this.revision;
       this.updatedAt = new Date(this.getAppTimeMs()).toISOString();
@@ -209,11 +247,14 @@ export class ElectionStore {
     // If local has unpushed mutations (e.g., newly created period, DPT, candidate, or committee) and a concurrent
     // remote update arrived before our push ACK returned, merge both non-destructively instead of overwriting local edits!
     if (this.hasPendingLocalSync && !isExplicitReset && !isRemoteUninitialized) {
+      const effectivePendingAction = this.pendingSchoolMutation
+        ? 'SYNC_UPDATE'
+        : this.lastAction || 'SYNC_UPDATE';
       const merged = applyAuthoritativeStateUpdate({
         current: snapshot,
         incoming: this.getSnapshot(),
         updatedBy: this.updatedBy || 'Admin Sekolah',
-        lastAction: this.lastAction || 'SYNC_UPDATE',
+        lastAction: effectivePendingAction,
         defaultAccounts: INITIAL_ACCOUNTS,
       });
 
@@ -242,7 +283,10 @@ export class ElectionStore {
 
       this.emitToListeners();
       if (!this.isHttpPushInFlight && this.queuedPushQueue.length === 0) {
-        this.pushStateToRemote(this.updatedBy || 'Admin Sekolah', this.lastAction || 'RESTORE_CLIENT_STATE');
+        this.pushStateToRemote(
+          this.updatedBy || 'Admin Sekolah',
+          this.pendingSchoolMutation ? 'SYNC_UPDATE' : this.lastAction || 'RESTORE_CLIENT_STATE'
+        );
       }
       return;
     }
@@ -259,7 +303,10 @@ export class ElectionStore {
         now - this.lastRestorePushAtMs > 2500
       ) {
         this.lastRestorePushAtMs = now;
-        this.pushStateToRemote(this.updatedBy || 'Admin Sekolah', 'RESTORE_CLIENT_STATE');
+        this.pushStateToRemote(
+          this.updatedBy || 'Admin Sekolah',
+          this.pendingSchoolMutation ? 'SYNC_UPDATE' : 'RESTORE_CLIENT_STATE'
+        );
       } else if (typeof snapshot.appTimeOffsetMs === 'number' && snapshot.appTimeOffsetMs !== this.appTimeOffsetMs) {
         this.appTimeOffsetMs = snapshot.appTimeOffsetMs;
         this.emitToListeners();
@@ -279,6 +326,7 @@ export class ElectionStore {
       this.updatedBy = snapshot.updatedBy || 'Admin Sekolah';
       this.lastAction = snapshot.lastAction || 'REALTIME_SYNC';
       this.hasPendingLocalSync = false;
+      this.pendingSchoolMutation = false;
       if (typeof snapshot.appTimeOffsetMs === 'number') {
         this.appTimeOffsetMs = snapshot.appTimeOffsetMs;
       }
@@ -389,6 +437,16 @@ export class ElectionStore {
       this.queuedPushQueue.length === 0 &&
       (typeof ackForRevision !== 'number' || this.latestLocalMutationRevision <= ackForRevision);
 
+    // Avoid redundant re-emits when an identical WS echo arrives immediately after HTTP ACK
+    if (
+      noNewerLocalMutation &&
+      !this.hasPendingLocalSync &&
+      serverState.revision === this.revision &&
+      serverState.updatedAt === this.updatedAt
+    ) {
+      return;
+    }
+
     // Only adopt full merged collections if no newer local mutation occurred while this ACK was in flight
     if (noNewerLocalMutation && (serverState.revision ?? 0) >= this.revision) {
       this.isApplyingRemoteState = true;
@@ -399,6 +457,7 @@ export class ElectionStore {
         if (serverState.updatedBy) this.updatedBy = serverState.updatedBy;
         if (serverState.lastAction) this.lastAction = serverState.lastAction;
         this.hasPendingLocalSync = false;
+        this.pendingSchoolMutation = false;
         if (typeof serverState.appTimeOffsetMs === 'number') {
           this.appTimeOffsetMs = serverState.appTimeOffsetMs;
         }
@@ -418,13 +477,14 @@ export class ElectionStore {
       } finally {
         this.isApplyingRemoteState = false;
       }
+      this.emitToListeners();
     } else if (noNewerLocalMutation) {
       this.hasPendingLocalSync = false;
+      this.pendingSchoolMutation = false;
       this.lastSyncedAt = new Date(this.getAppTimeMs()).toISOString();
       this.saveToStorage();
+      this.emitToListeners();
     }
-
-    this.emitToListeners();
   }
 
   /**
@@ -584,11 +644,12 @@ export class ElectionStore {
       this.saveToStorage();
       if (this.hasPendingLocalSync && typeof navigator !== 'undefined' && typeof navigator.sendBeacon === 'function') {
         try {
-          const compact = this.buildPushSnapshot(this.lastAction || 'SYNC_UPDATE');
+          const actionToFlush = this.pendingSchoolMutation ? 'SYNC_UPDATE' : this.lastAction || 'SYNC_UPDATE';
+          const compact = this.buildPushSnapshot(actionToFlush);
           const payload = JSON.stringify({
             state: compact,
             updatedBy: this.updatedBy || 'Admin Sekolah',
-            lastAction: this.lastAction || 'SYNC_UPDATE',
+            lastAction: actionToFlush,
             senderId: this.clientId,
           });
           if (payload.length < 60000) {
@@ -659,6 +720,11 @@ export class ElectionStore {
           }
 
           if (msg.type === 'PONG' || msg.type === 'TIME_HEARTBEAT' || msg.type === 'PRESENCE_UPDATE') {
+            const prevConnected = this.isConnected;
+            const prevTransport = this.transport;
+            const prevOnline = this.onlineClients;
+            const prevOffset = this.appTimeOffsetMs;
+
             this.isConnected = true;
             this.transport = 'websocket';
             if (typeof msg.serverTimeMs === 'number') {
@@ -674,12 +740,23 @@ export class ElectionStore {
             if (typeof msg.appTimeOffsetMs === 'number' && msg.appTimeOffsetMs !== this.appTimeOffsetMs) {
               this.appTimeOffsetMs = msg.appTimeOffsetMs;
             }
-            // If server has a different revision than us, request full state immediately
-            if (typeof msg.revision === 'number' && msg.revision !== this.revision) {
+            // Request full state if server diverged and we aren't actively waiting on an in-flight push ACK
+            if (
+              typeof msg.revision === 'number' &&
+              (msg.revision > this.revision ||
+                (msg.revision !== this.revision && !this.hasPendingLocalSync && !this.isHttpPushInFlight))
+            ) {
               socket.send(JSON.stringify({ type: 'REQUEST_STATE' }));
             }
             this.lastSyncedAt = new Date(this.getAppTimeMs()).toISOString();
-            this.emitToListeners();
+            if (
+              !prevConnected ||
+              prevTransport !== this.transport ||
+              prevOnline !== this.onlineClients ||
+              prevOffset !== this.appTimeOffsetMs
+            ) {
+              this.emitToListeners();
+            }
           }
         } catch {
           // Ignore malformed WS message
@@ -734,7 +811,10 @@ export class ElectionStore {
       if (isResetEpochId(data.epochId) && data.epochId !== this.epochId) {
         await this.fetchStateFromHttp(true);
       } else if (this.hasPendingLocalSync && !this.isHttpPushInFlight && this.queuedPushQueue.length === 0) {
-        this.pushStateToRemote(this.updatedBy || 'Admin Sekolah', this.lastAction || 'RESTORE_CLIENT_STATE');
+        this.pushStateToRemote(
+          this.updatedBy || 'Admin Sekolah',
+          this.pendingSchoolMutation ? 'SYNC_UPDATE' : this.lastAction || 'RESTORE_CLIENT_STATE'
+        );
       } else if (typeof data.revision === 'number' && data.revision > this.revision) {
         // Server has a newer revision than us, immediately fetch full authoritative snapshot!
         await this.fetchStateFromHttp(false);
@@ -749,13 +829,19 @@ export class ElectionStore {
           const now = Date.now();
           if (now - this.lastRestorePushAtMs > 2500) {
             this.lastRestorePushAtMs = now;
-            this.pushStateToRemote(this.updatedBy || 'Admin Sekolah', 'RESTORE_CLIENT_STATE');
+            this.pushStateToRemote(
+              this.updatedBy || 'Admin Sekolah',
+              this.pendingSchoolMutation ? 'SYNC_UPDATE' : 'RESTORE_CLIENT_STATE'
+            );
           }
         }
       } else {
+        const prevConnected = this.isConnected;
         this.isConnected = true;
         this.lastSyncedAt = new Date(this.getAppTimeMs()).toISOString();
-        this.emitToListeners();
+        if (!prevConnected) {
+          this.emitToListeners();
+        }
       }
     } catch {
       if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
@@ -828,8 +914,10 @@ export class ElectionStore {
     const snapshot = this.getSnapshot();
     const mutatesSchool =
       lastAction === 'UPDATE_KONFIGURASI_SEKOLAH' ||
+      lastAction === 'SYNC_UPDATE' ||
       lastAction === 'RESET_DATA_DEMO' ||
-      lastAction === 'RESTORE_CLIENT_STATE';
+      lastAction === 'RESTORE_CLIENT_STATE' ||
+      this.pendingSchoolMutation;
 
     if (mutatesSchool) {
       return snapshot;
@@ -945,6 +1033,7 @@ export class ElectionStore {
       if (typeof meta.updatedBy === 'string' && meta.updatedBy) this.updatedBy = meta.updatedBy;
       if (typeof meta.lastAction === 'string' && meta.lastAction) this.lastAction = meta.lastAction;
       if (typeof meta.hasPendingLocalSync === 'boolean') this.hasPendingLocalSync = meta.hasPendingLocalSync;
+      if (typeof meta.pendingSchoolMutation === 'boolean') this.pendingSchoolMutation = meta.pendingSchoolMutation;
       if (meta.tombstones && typeof meta.tombstones === 'object') {
         this.tombstones = meta.tombstones as DeletedEntityTombstones;
       }
@@ -1056,6 +1145,7 @@ export class ElectionStore {
         lastAction: this.lastAction,
         appTimeOffsetMs: this.appTimeOffsetMs,
         hasPendingLocalSync: this.hasPendingLocalSync,
+        pendingSchoolMutation: this.pendingSchoolMutation,
         tombstones: this.tombstones,
       })
     );
@@ -2230,10 +2320,15 @@ export class ElectionStore {
     return this.committee.filter((c) => c.electionPeriodId === target);
   }
 
-  public addCommitteeMember(member: Omit<CommitteeMember, 'id'>) {
+  public addCommitteeMember(member: Omit<CommitteeMember, 'id'> & { id?: string }) {
+    const providedId = member.id?.trim();
+    const newId =
+      providedId && !this.committee.some((c) => c.id === providedId)
+        ? providedId
+        : `comm_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
     const newMember: CommitteeMember = {
       ...member,
-      id: `comm_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+      id: newId,
     };
     this.committee = [...this.committee, newMember];
     this.logAudit('Admin Sekolah', 'TAMBAH_PANITIA', `Menambahkan anggota panitia: ${newMember.memberName} (${newMember.role})`, '192.168.10.1', 'INFO');

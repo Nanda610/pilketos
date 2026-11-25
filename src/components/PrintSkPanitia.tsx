@@ -11,7 +11,7 @@
  * - Pratinjau & Cetak Format A4 Kedinasan Resmi
  */
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { createPortal } from 'react-dom';
 import { 
   Printer, X, FileText, Plus, Trash2, ChevronLeft, ChevronRight,
@@ -21,8 +21,9 @@ import {
   Mail, Hash, Phone, Globe, Upload, Image as ImageIcon, Move, Maximize2,
   Minimize2, ZoomIn, ZoomOut
 } from 'lucide-react';
-import { SchoolConfig, ElectionPeriod, CommitteeMember, OrganizationType } from '../types';
+import { SchoolConfig, ElectionPeriod, CommitteeMember, OrganizationType, SkDocumentConfig } from '../types';
 import { electionStore } from '../lib/store';
+import { saveFormDraft, loadFormDraft, clearFormDraft } from '../lib/formDrafts';
 import { SchoolCrestLogo, OsisLogoBadge } from './CandidateAvatar';
 import { useAppDialog } from './ConfirmDialog';
 import {
@@ -78,6 +79,8 @@ export const PrintSkPanitia: React.FC<PrintSkPanitiaProps> = ({
   const [saveToast, setSaveToast] = useState<string | null>(null);
   const [onlyDocumentMode, setOnlyDocumentMode] = useState<boolean>(false);
   const [zoomScale, setZoomScale] = useState<number>(100);
+  const [editingClassMemberId, setEditingClassMemberId] = useState<string | null>(null);
+  const [editingClassDraft, setEditingClassDraft] = useState<string>('');
   const { dialogNode, confirmDialog, alertDialog } = useAppDialog();
 
   // Isolate SK preview & print from all background DOM objects (#root, canvas, navbar)
@@ -88,30 +91,87 @@ export const PrintSkPanitia: React.FC<PrintSkPanitiaProps> = ({
     };
   }, []);
 
-  // Extract initial SK metadata
+  // Extract initial SK metadata & saved persistent config / unsaved draft
+  const skDraftKey = `sk_panitia_draft_${period.id}`;
+  const savedSkConfig = school.skConfigsByPeriod?.[period.id];
+  const [initialSkDraftEnvelope] = useState(() =>
+    loadFormDraft<
+      Omit<SkDocumentConfig, 'updatedAt'> & { committeeList?: EditableCommitteeMember[] }
+    >(skDraftKey)
+  );
+  const savedSkUpdatedAtMs = savedSkConfig?.updatedAt ? Date.parse(savedSkConfig.updatedAt) : 0;
+  const restoredDraft =
+    initialSkDraftEnvelope && initialSkDraftEnvelope.updatedAt > savedSkUpdatedAtMs
+      ? initialSkDraftEnvelope.data
+      : null;
+
+  const [hasUnsavedChanges, setHasUnsavedChanges] = useState<boolean>(() => Boolean(restoredDraft));
+  const isUserDirtyRef = useRef<boolean>(Boolean(restoredDraft));
+  const lastSavedSignatureRef = useRef<string>('');
+  const lastCommittedUpdatedAtRef = useRef<string>(savedSkConfig?.updatedAt || '');
+  const autoSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const persistLatestRef = useRef<(options?: { showSuccessToast?: string }) => void>(() => {});
+
   const defaultSkNum = initialCommittee[0]?.skNumber || `421.3/035/SK-KS/${school.type}/${new Date().getFullYear()}`;
   const defaultSkDate = initialCommittee[0]?.skDate || new Date().toISOString().split('T')[0];
 
   // --- STATE: 1. IDENTITAS DOKUMEN & PENGESAHAN ---
-  const [skNumber, setSkNumber] = useState(defaultSkNum);
-  const [skDate, setSkDate] = useState(defaultSkDate);
-  const [skCity, setSkCity] = useState(school.city || 'Kota Administrasi');
+  const [skNumber, setSkNumber] = useState(
+    () => restoredDraft?.skNumber ?? savedSkConfig?.skNumber ?? defaultSkNum
+  );
+  const [skDate, setSkDate] = useState(
+    () => restoredDraft?.skDate ?? savedSkConfig?.skDate ?? defaultSkDate
+  );
+  const [skCity, setSkCity] = useState(
+    () => restoredDraft?.skCity ?? savedSkConfig?.skCity ?? (school.city || 'Kota Administrasi')
+  );
 
   // --- STATE: 2. KEPALA SEKOLAH & PEJABAT PENGESAH ---
-  const [principalName, setPrincipalName] = useState(school.principalName || 'Dra. Hj. Nurul Hidayah, M.Pd');
-  const [principalNip, setPrincipalNip] = useState(school.principalNip || '19780512 200212 1 003');
-  const [principalRank, setPrincipalRank] = useState('Pembina Utama Muda / IV-c');
-  const [supervisorName, setSupervisorName] = useState('Drs. Bambang Sudarsono, M.Pd');
-  const [supervisorRole, setSupervisorRole] = useState(`Wakasek Kesiswaan & Pembina ${school.type}`);
-  const [supervisorNip, setSupervisorNip] = useState('19820315 200604 1 008');
+  const [principalName, setPrincipalName] = useState(
+    () => restoredDraft?.principalName ?? savedSkConfig?.principalName ?? (school.principalName || 'Dra. Hj. Nurul Hidayah, M.Pd')
+  );
+  const [principalNip, setPrincipalNip] = useState(
+    () => restoredDraft?.principalNip ?? savedSkConfig?.principalNip ?? (school.principalNip || '19780512 200212 1 003')
+  );
+  const [principalRank, setPrincipalRank] = useState(
+    () => restoredDraft?.principalRank ?? savedSkConfig?.principalRank ?? 'Pembina Utama Muda / IV-c'
+  );
+  const [supervisorName, setSupervisorName] = useState(
+    () => restoredDraft?.supervisorName ?? savedSkConfig?.supervisorName ?? 'Drs. Bambang Sudarsono, M.Pd'
+  );
+  const [supervisorRole, setSupervisorRole] = useState(
+    () => restoredDraft?.supervisorRole ?? savedSkConfig?.supervisorRole ?? `Wakasek Kesiswaan & Pembina ${school.type}`
+  );
+  const [supervisorNip, setSupervisorNip] = useState(
+    () => restoredDraft?.supervisorNip ?? savedSkConfig?.supervisorNip ?? '19820315 200604 1 008'
+  );
 
   // --- STATE: 3. ACARA & PELAKSANAAN PEMILIHAN ---
-  const [eventName, setEventName] = useState(period.periodName || `Pemilihan Umum Ketua dan Wakil Ketua ${school.type} (PILKETOS)`);
-  const [eventTheme, setEventTheme] = useState('Mewujudkan Kepemimpinan Berkarakter, Berintegritas, Kreatif, dan Menjunjung Tinggi Demokrasi Sekolah');
-  const [academicYear, setAcademicYear] = useState(period.academicYear || `${new Date().getFullYear()}/${new Date().getFullYear() + 1}`);
-  const [eventDateText, setEventDateText] = useState('Senin, 27 Oktober 2026');
-  const [eventTimeText, setEventTimeText] = useState('Pukul 08.00 s/d 14.00 WIB');
-  const [eventLocation, setEventLocation] = useState(`Bilik Suara Digital Aula Utama & Lab Komputer ${school.name}`);
+  const defaultEventName = period.periodName || `Pemilihan Umum Ketua dan Wakil Ketua ${school.type} (PILKETOS)`;
+  const defaultEventTheme = 'Mewujudkan Kepemimpinan Berkarakter, Berintegritas, Kreatif, dan Menjunjung Tinggi Demokrasi Sekolah';
+  const defaultAcademicYear = period.academicYear || `${new Date().getFullYear()}/${new Date().getFullYear() + 1}`;
+  const defaultEventDateText = 'Senin, 27 Oktober 2026';
+  const defaultEventTimeText = 'Pukul 08.00 s/d 14.00 WIB';
+  const defaultEventLocation = `Bilik Suara Digital Aula Utama & Lab Komputer ${school.name}`;
+
+  const [eventName, setEventName] = useState(
+    () => restoredDraft?.eventName ?? savedSkConfig?.eventName ?? defaultEventName
+  );
+  const [eventTheme, setEventTheme] = useState(
+    () => restoredDraft?.eventTheme ?? savedSkConfig?.eventTheme ?? defaultEventTheme
+  );
+  const [academicYear, setAcademicYear] = useState(
+    () => restoredDraft?.academicYear ?? savedSkConfig?.academicYear ?? defaultAcademicYear
+  );
+  const [eventDateText, setEventDateText] = useState(
+    () => restoredDraft?.eventDateText ?? savedSkConfig?.eventDateText ?? defaultEventDateText
+  );
+  const [eventTimeText, setEventTimeText] = useState(
+    () => restoredDraft?.eventTimeText ?? savedSkConfig?.eventTimeText ?? defaultEventTimeText
+  );
+  const [eventLocation, setEventLocation] = useState(
+    () => restoredDraft?.eventLocation ?? savedSkConfig?.eventLocation ?? defaultEventLocation
+  );
 
   // --- STATE: 4. KOP SURAT RESMI & KONTAK SATUAN PENDIDIKAN ---
   const initialKopLine1 = school.province
@@ -122,20 +182,56 @@ export const PrintSkPanitia: React.FC<PrintSkPanitiaProps> = ({
         : `PEMERINTAH DAERAH PROVINSI ${school.province.toUpperCase()}`)
     : 'PEMERINTAH DAERAH PROVINSI DKI JAKARTA';
 
-  const [kopBarLine1, setKopBarLine1] = useState(initialKopLine1);
-  const [kopBarLine2, setKopBarLine2] = useState('DINAS PENDIDIKAN DAN KEBUDAYAAN');
-  const [showKopLine2, setShowKopLine2] = useState(true);
+  const resolvedInitialKopLine1 =
+    restoredDraft?.kopBarLine1 ??
+    (school.kopBarLine1 !== undefined
+      ? school.kopBarLine1
+      : savedSkConfig?.kopBarLine1 !== undefined
+      ? savedSkConfig.kopBarLine1
+      : initialKopLine1);
+  const resolvedInitialKopLine2 =
+    restoredDraft?.kopBarLine2 ??
+    (school.kopBarLine2 !== undefined
+      ? school.kopBarLine2
+      : savedSkConfig?.kopBarLine2 !== undefined
+      ? savedSkConfig.kopBarLine2
+      : 'DINAS PENDIDIKAN DAN KEBUDAYAAN');
+  const resolvedInitialShowKopLine2 =
+    restoredDraft?.showKopLine2 ??
+    (school.showKopLine2 !== undefined
+      ? school.showKopLine2
+      : savedSkConfig?.showKopLine2 !== undefined
+      ? savedSkConfig.showKopLine2
+      : true);
+
+  const [kopBarLine1, setKopBarLine1] = useState(resolvedInitialKopLine1);
+  const [kopBarLine2, setKopBarLine2] = useState(resolvedInitialKopLine2);
+  const [showKopLine2, setShowKopLine2] = useState(resolvedInitialShowKopLine2);
   const [showManualKopModal, setShowManualKopModal] = useState(false);
 
-  const [agencyProvince, setAgencyProvince] = useState(initialKopLine1);
-  const [agencyDept, setAgencyDept] = useState('DINAS PENDIDIKAN DAN KEBUDAYAAN');
-  const [schoolCustomName, setSchoolCustomName] = useState(school.name);
-  const [schoolAddressText, setSchoolAddressText] = useState(school.address);
-  const [schoolPostalCode, setSchoolPostalCode] = useState(school.postalCode || '10330');
-  const [schoolPhoneText, setSchoolPhoneText] = useState(school.phone);
-  const [schoolEmailText, setSchoolEmailText] = useState(school.email || 'info@sekolah.sch.id');
-  const [schoolWebsiteText, setSchoolWebsiteText] = useState(school.website);
-  const [schoolNpsnText, setSchoolNpsnText] = useState(school.npsn);
+  const [agencyProvince, setAgencyProvince] = useState(resolvedInitialKopLine1);
+  const [agencyDept, setAgencyDept] = useState(resolvedInitialKopLine2);
+  const [schoolCustomName, setSchoolCustomName] = useState(
+    () => restoredDraft?.schoolCustomName ?? savedSkConfig?.schoolCustomName ?? school.name
+  );
+  const [schoolAddressText, setSchoolAddressText] = useState(
+    () => restoredDraft?.schoolAddressText ?? savedSkConfig?.schoolAddressText ?? school.address
+  );
+  const [schoolPostalCode, setSchoolPostalCode] = useState(
+    () => restoredDraft?.schoolPostalCode ?? savedSkConfig?.schoolPostalCode ?? (school.postalCode || '10330')
+  );
+  const [schoolPhoneText, setSchoolPhoneText] = useState(
+    () => restoredDraft?.schoolPhoneText ?? savedSkConfig?.schoolPhoneText ?? school.phone
+  );
+  const [schoolEmailText, setSchoolEmailText] = useState(
+    () => restoredDraft?.schoolEmailText ?? savedSkConfig?.schoolEmailText ?? (school.email || 'info@sekolah.sch.id')
+  );
+  const [schoolWebsiteText, setSchoolWebsiteText] = useState(
+    () => restoredDraft?.schoolWebsiteText ?? savedSkConfig?.schoolWebsiteText ?? school.website
+  );
+  const [schoolNpsnText, setSchoolNpsnText] = useState(
+    () => restoredDraft?.schoolNpsnText ?? savedSkConfig?.schoolNpsnText ?? school.npsn
+  );
 
   // --- STATE: LOGO KOP SURAT (SEKOLAH & OSIS) ---
   const [osisLogoUrl, setOsisLogoUrl] = useState<string>(school.osisLogoUrl || '');
@@ -299,30 +395,12 @@ export const PrintSkPanitia: React.FC<PrintSkPanitiaProps> = ({
   const [showEditStampModal, setShowEditStampModal] = useState<boolean>(false);
 
   const handleSaveStampAndSignee = (closeModal = true) => {
-    const savedStamp = saveStampConfig(
-      {
-        headerText: stampHeaderText,
-        institutionText: stampInstitutionText,
-        footerText: stampFooterText,
-        sizePx: stampSizePx,
-        rotationDeg: stampRotationDeg,
-        offsetX: stampOffsetX,
-        offsetY: stampOffsetY,
-        colorTheme: stampColorTheme,
-        signatoryTitle,
-      },
-      schoolCustomName
-    );
-    electionStore.updateSchool({
-      principalName: principalName.trim(),
-      principalNip: principalNip.trim(),
-      city: skCity.trim(),
-      stampConfig: savedStamp,
+    persistSkChangesToStore({
+      showSuccessToast: 'Perubahan Stempel, Tanda Tangan & Pengesahan Kepala Sekolah berhasil disimpan permanen!',
     });
     if (closeModal) {
       setShowEditStampModal(false);
     }
-    showToast('Perubahan Stempel, Tanda Tangan & Pengesahan Kepala Sekolah berhasil disimpan!');
   };
 
   const handleResetStampConfig = () => {
@@ -501,42 +579,54 @@ export const PrintSkPanitia: React.FC<PrintSkPanitiaProps> = ({
   };
 
   // --- STATE: 5. KONSIDERAN & DIKTUM MEMUTUSKAN ---
-  const [menimbangList, setMenimbangList] = useState<string[]>([
-    `bahwa dalam rangka regenerasi kepengurusan dan kesinambungan roda organisasi kesiswaan serta sarana pendidikan demokrasi jujur dan adil (LUBER-JURDIL) bagi peserta didik, perlu diselenggarakan ${eventName} Tahun Ajaran ${academicYear};`,
+  const defaultMenimbangList = [
+    `bahwa dalam rangka regenerasi kepengurusan dan kesinambungan roda organisasi kesiswaan serta sarana pendidikan demokrasi jujur dan adil (LUBER-JURDIL) bagi peserta didik, perlu diselenggarakan ${defaultEventName} Tahun Ajaran ${defaultAcademicYear};`,
     `bahwa sehubungan dengan berakhirnya masa bakti kepengurusan sebelumnya, perlu dibentuk Panitia Pelaksana Pemilihan yang berkepribadian cakap, berintegritas tinggi, dan netral;`,
-    `bahwa mereka yang namanya tercantum dalam lampiran keputusan ini dipandang mampu dan memenuhi syarat untuk diangkat dan ditetapkan sebagai Panitia Pemilihan;`
-  ]);
+    `bahwa mereka yang namanya tercantum dalam lampiran keputusan ini dipandang mampu dan memenuhi syarat untuk diangkat dan ditetapkan sebagai Panitia Pemilihan;`,
+  ];
+  const [menimbangList, setMenimbangList] = useState<string[]>(
+    () => restoredDraft?.menimbangList ?? savedSkConfig?.menimbangList ?? defaultMenimbangList
+  );
 
-  const [mengingatList, setMengingatList] = useState<string[]>([
+  const defaultMengingatList = [
     'Undang-Undang Republik Indonesia Nomor 20 Tahun 2003 tentang Sistem Pendidikan Nasional;',
     'Peraturan Menteri Pendidikan Nasional Nomor 39 Tahun 2008 tentang Pembinaan Kesiswaan;',
     'Permendikbudristek Nomor 46 Tahun 2023 tentang Pencegahan dan Penanganan Kekerasan di Lingkungan Satuan Pendidikan;',
     `Anggaran Dasar dan Anggaran Rumah Tangga (AD/ART) Organisasi Kesiswaan ${school.name};`,
-    `Program Kerja Tahunan Kesiswaan ${school.name} Tahun Ajaran ${academicYear}.`
-  ]);
+    `Program Kerja Tahunan Kesiswaan ${school.name} Tahun Ajaran ${defaultAcademicYear}.`,
+  ];
+  const [mengingatList, setMengingatList] = useState<string[]>(
+    () => restoredDraft?.mengingatList ?? savedSkConfig?.mengingatList ?? defaultMengingatList
+  );
 
+  const defaultMemperhatikanText = `Hasil Rapat Koordinasi Dewan Pembina Kesiswaan bersama Pengurus ${school.type} dan Perwakilan Musyawarah Perwakilan Kelas (MPK) mengenai tahapan pelaksanaan pemilihan umum siswa.`;
   const [memperhatikanText, setMemperhatikanText] = useState(
-    `Hasil Rapat Koordinasi Dewan Pembina Kesiswaan bersama Pengurus ${school.type} dan Perwakilan Musyawarah Perwakilan Kelas (MPK) mengenai tahapan pelaksanaan pemilihan umum siswa.`
+    () => restoredDraft?.memperhatikanText ?? savedSkConfig?.memperhatikanText ?? defaultMemperhatikanText
   );
 
+  const defaultDiktumMenetapkan = `KEPUTUSAN KEPALA ${school.name.toUpperCase()} TENTANG PEMBENTUKAN DAN PENETAPAN SUSUNAN PANITIA PEMILIHAN KETUA DAN WAKIL KETUA ${school.type} TAHUN AJARAN ${defaultAcademicYear}.`;
   const [diktumMenetapkan, setDiktumMenetapkan] = useState(
-    `KEPUTUSAN KEPALA ${schoolCustomName.toUpperCase()} TENTANG PEMBENTUKAN DAN PENETAPAN SUSUNAN PANITIA PEMILIHAN KETUA DAN WAKIL KETUA ${school.type} TAHUN AJARAN ${academicYear}.`
+    () => restoredDraft?.diktumMenetapkan ?? savedSkConfig?.diktumMenetapkan ?? defaultDiktumMenetapkan
   );
 
+  const defaultDiktumKesatu = `Membentuk dan menetapkan Panitia Pemilihan Ketua dan Wakil Ketua ${school.type} Periode ${defaultAcademicYear} dengan susunan personalia sebagaimana tercantum pada Lampiran I keputusan ini.`;
   const [diktumKesatu, setDiktumKesatu] = useState(
-    `Membentuk dan menetapkan Panitia Pemilihan Ketua dan Wakil Ketua ${school.type} Periode ${academicYear} dengan susunan personalia sebagaimana tercantum pada Lampiran I keputusan ini.`
+    () => restoredDraft?.diktumKesatu ?? savedSkConfig?.diktumKesatu ?? defaultDiktumKesatu
   );
 
+  const defaultDiktumKedua = `Panitia sebagaimana dimaksud Diktum KESATU bertugas menyusun tata tertib, memverifikasi berkas persyaratan pasangan calon, memutakhirkan Daftar Pemilih Tetap (DPT), mengelola fasilitas kampanye, mengoperasikan bilik suara digital, dan menyusun Berita Acara Hasil Pemilihan (BAHP).`;
   const [diktumKedua, setDiktumKedua] = useState(
-    `Panitia sebagaimana dimaksud Diktum KESATU bertugas menyusun tata tertib, memverifikasi berkas persyaratan pasangan calon, memutakhirkan Daftar Pemilih Tetap (DPT), mengelola fasilitas kampanye, mengoperasikan bilik suara digital, dan menyusun Berita Acara Hasil Pemilihan (BAHP).`
+    () => restoredDraft?.diktumKedua ?? savedSkConfig?.diktumKedua ?? defaultDiktumKedua
   );
 
+  const defaultDiktumKetiga = `Segala biaya yang timbul akibat pelaksanaan keputusan ini dibebankan pada anggaran pembinaan kesiswaan dan kas ${school.type} yang sah serta dapat dipertanggungjawabkan.`;
   const [diktumKetiga, setDiktumKetiga] = useState(
-    `Segala biaya yang timbul akibat pelaksanaan keputusan ini dibebankan pada anggaran pembinaan kesiswaan dan kas ${school.type} yang sah serta dapat dipertanggungjawabkan.`
+    () => restoredDraft?.diktumKetiga ?? savedSkConfig?.diktumKetiga ?? defaultDiktumKetiga
   );
 
+  const defaultDiktumKeempat = `Keputusan ini berlaku sejak tanggal ditetapkan, dan apabila di kemudian hari terdapat kekeliruan dalam penetapannya akan diperbaiki sebagaimana mestinya.`;
   const [diktumKeempat, setDiktumKeempat] = useState(
-    `Keputusan ini berlaku sejak tanggal ditetapkan, dan apabila di kemudian hari terdapat kekeliruan dalam penetapannya akan diperbaiki sebagaimana mestinya.`
+    () => restoredDraft?.diktumKeempat ?? savedSkConfig?.diktumKeempat ?? defaultDiktumKeempat
   );
 
   // --- STATE: 6. SUSUNAN PERSONALIA PANITIA (EDITABLE) ---
@@ -546,7 +636,7 @@ export const PrintSkPanitia: React.FC<PrintSkPanitiaProps> = ({
         role: c.role,
         memberName: c.memberName,
         className: c.className || 'Kelas VIII',
-        duties: getDutyDescription(c.role),
+        duties: c.duties || getDutyDescription(c.role),
       }))
     : [
         { id: 'c1', role: 'Ketua Panitia', memberName: 'Dimas Arya Pratama', className: 'VIII A', duties: 'Memimpin seluruh tahapan, koordinasi pleno & pengesahan berita acara' },
@@ -558,12 +648,23 @@ export const PrintSkPanitia: React.FC<PrintSkPanitiaProps> = ({
         { id: 'c7', role: 'Pengawas & Saksi', memberName: 'Zahra Amelia', className: 'IX A', duties: 'Pengawasan independen kepatuhan tata tertib & saksi pleno rekapitulasi' },
       ];
 
-  const [committeeList, setCommitteeList] = useState<EditableCommitteeMember[]>(defaultCommitteeItems);
+  const [committeeList, setCommitteeList] = useState<EditableCommitteeMember[]>(
+    () =>
+      restoredDraft?.committeeList && restoredDraft.committeeList.length > 0
+        ? restoredDraft.committeeList
+        : defaultCommitteeItems
+  );
 
   // --- STATE: 7. TOGGLES & DISPLAY OPTIONS ---
-  const [showQrCode, setShowQrCode] = useState(true);
-  const [showStamp, setShowStamp] = useState(true);
-  const [showWatermark, setShowWatermark] = useState(false);
+  const [showQrCode, setShowQrCode] = useState<boolean>(
+    () => restoredDraft?.showQrCode ?? savedSkConfig?.showQrCode ?? true
+  );
+  const [showStamp, setShowStamp] = useState<boolean>(
+    () => restoredDraft?.showStamp ?? savedSkConfig?.showStamp ?? true
+  );
+  const [showWatermark, setShowWatermark] = useState<boolean>(
+    () => restoredDraft?.showWatermark ?? savedSkConfig?.showWatermark ?? false
+  );
 
   // --- STATE: 8. DYNAMIC PAGES CONFIG (1-99 PAGES) ---
   const initialPages: SkPageConfig[] = [
@@ -572,14 +673,14 @@ export const PrintSkPanitia: React.FC<PrintSkPanitiaProps> = ({
       pageNumber: 1,
       type: 'main_sk',
       title: 'SURAT KEPUTUSAN KEPALA SATUAN PENDIDIKAN',
-      subtitle: `TENTANG PEMBENTUKAN DAN PENETAPAN PANITIA PEMILIHAN KETUA DAN WAKIL KETUA ${school.type} TAHUN AJARAN ${academicYear}`,
+      subtitle: `TENTANG PEMBENTUKAN DAN PENETAPAN PANITIA PEMILIHAN KETUA DAN WAKIL KETUA ${school.type} TAHUN AJARAN ${defaultAcademicYear}`,
     },
     {
       id: 'page-2',
       pageNumber: 2,
       type: 'appendix_members',
       title: 'LAMPIRAN I: KEPUTUSAN KEPALA SEKOLAH',
-      subtitle: `SUSUNAN PERSONALIA PANITIA PEMILIHAN ${school.type} TAHUN AJARAN ${academicYear}`,
+      subtitle: `SUSUNAN PERSONALIA PANITIA PEMILIHAN ${school.type} TAHUN AJARAN ${defaultAcademicYear}`,
     },
     {
       id: 'page-3',
@@ -604,7 +705,442 @@ export const PrintSkPanitia: React.FC<PrintSkPanitiaProps> = ({
     },
   ];
 
-  const [pages, setPages] = useState<SkPageConfig[]>(initialPages);
+  const [pages, setPages] = useState<SkPageConfig[]>(
+    () =>
+      restoredDraft?.pages && restoredDraft.pages.length > 0
+        ? restoredDraft.pages
+        : savedSkConfig?.pages && savedSkConfig.pages.length > 0
+        ? savedSkConfig.pages
+        : initialPages
+  );
+
+  const buildSkConfigSnapshot = (updatedAtIso?: string): SkDocumentConfig => ({
+    skNumber,
+    skDate,
+    skCity,
+    kopBarLine1,
+    kopBarLine2,
+    showKopLine2,
+    schoolCustomName,
+    schoolAddressText,
+    schoolPostalCode,
+    schoolPhoneText,
+    schoolEmailText,
+    schoolWebsiteText,
+    schoolNpsnText,
+    principalName,
+    principalNip,
+    principalRank,
+    supervisorName,
+    supervisorRole,
+    supervisorNip,
+    eventName,
+    eventTheme,
+    academicYear,
+    eventDateText,
+    eventTimeText,
+    eventLocation,
+    menimbangList,
+    mengingatList,
+    memperhatikanText,
+    diktumMenetapkan,
+    diktumKesatu,
+    diktumKedua,
+    diktumKetiga,
+    diktumKeempat,
+    pages,
+    showQrCode,
+    showStamp,
+    showWatermark,
+    updatedAt: updatedAtIso || new Date(electionStore.getAppTimeMs()).toISOString(),
+  });
+
+  const buildSkDraftPayload = () => ({
+    skNumber,
+    skDate,
+    skCity,
+    kopBarLine1,
+    kopBarLine2,
+    showKopLine2,
+    schoolCustomName,
+    schoolAddressText,
+    schoolPostalCode,
+    schoolPhoneText,
+    schoolEmailText,
+    schoolWebsiteText,
+    schoolNpsnText,
+    principalName,
+    principalNip,
+    principalRank,
+    supervisorName,
+    supervisorRole,
+    supervisorNip,
+    eventName,
+    eventTheme,
+    academicYear,
+    eventDateText,
+    eventTimeText,
+    eventLocation,
+    menimbangList,
+    mengingatList,
+    memperhatikanText,
+    diktumMenetapkan,
+    diktumKesatu,
+    diktumKedua,
+    diktumKetiga,
+    diktumKeempat,
+    pages,
+    showQrCode,
+    showStamp,
+    showWatermark,
+    committeeList,
+  });
+
+  const currentSkDraftPayload = buildSkDraftPayload();
+  const currentSkSignature = JSON.stringify(currentSkDraftPayload);
+  if (lastSavedSignatureRef.current === '' && !restoredDraft) {
+    lastSavedSignatureRef.current = currentSkSignature;
+  }
+
+  const persistSkChangesToStore = (options?: {
+    showSuccessToast?: string;
+    overrideCommitteeList?: EditableCommitteeMember[];
+    overrideConfig?: Omit<SkDocumentConfig, 'updatedAt'>;
+  }) => {
+    if (autoSaveTimerRef.current) {
+      clearTimeout(autoSaveTimerRef.current);
+      autoSaveTimerRef.current = null;
+    }
+
+    const activeCommitteeList = options?.overrideCommitteeList ?? committeeList;
+    const savedLogo = saveKopLogoConfig(currentLogoConfig);
+    setSavedLogoConfig(savedLogo);
+    const savedStamp = saveStampConfig(
+      {
+        headerText: stampHeaderText,
+        institutionText: stampInstitutionText,
+        footerText: stampFooterText,
+        sizePx: stampSizePx,
+        rotationDeg: stampRotationDeg,
+        offsetX: stampOffsetX,
+        offsetY: stampOffsetY,
+        colorTheme: stampColorTheme,
+        signatoryTitle,
+      },
+      options?.overrideConfig?.schoolCustomName ?? schoolCustomName
+    );
+
+    const nowIso = new Date(electionStore.getAppTimeMs()).toISOString();
+    lastCommittedUpdatedAtRef.current = nowIso;
+
+    const skSnapshot: SkDocumentConfig = options?.overrideConfig
+      ? { ...options.overrideConfig, updatedAt: nowIso }
+      : buildSkConfigSnapshot(nowIso);
+
+    const cleanKop1 = skSnapshot.kopBarLine1.trim();
+    const cleanKop2 = skSnapshot.kopBarLine2.trim();
+    const latestSchool = electionStore.getSchool();
+
+    let idChanged = false;
+    let syncedCommitteeList: EditableCommitteeMember[] = activeCommitteeList;
+
+    electionStore.runBatch(
+      () => {
+        electionStore.updateSchool({
+          name: skSnapshot.schoolCustomName.trim() || latestSchool.name,
+          principalName: skSnapshot.principalName.trim(),
+          principalNip: skSnapshot.principalNip.trim(),
+          city: skSnapshot.skCity.trim(),
+          address: skSnapshot.schoolAddressText.trim(),
+          postalCode: skSnapshot.schoolPostalCode.trim(),
+          phone: skSnapshot.schoolPhoneText.trim(),
+          email: skSnapshot.schoolEmailText.trim(),
+          website: skSnapshot.schoolWebsiteText.trim(),
+          npsn: skSnapshot.schoolNpsnText.trim(),
+          logoUrl: schoolLogoUrl.trim(),
+          osisLogoUrl: osisLogoUrl.trim(),
+          kopBarLine1: cleanKop1,
+          kopBarLine2: cleanKop2,
+          showKopLine2: skSnapshot.showKopLine2,
+          kopLogoConfig: savedLogo,
+          stampConfig: savedStamp,
+          skConfigsByPeriod: {
+            ...(latestSchool.skConfigsByPeriod || {}),
+            [period.id]: skSnapshot,
+          },
+        });
+
+        electionStore.updatePeriod(period.id, {
+          periodName: skSnapshot.eventName.trim() || period.periodName,
+          academicYear: skSnapshot.academicYear.trim() || period.academicYear,
+        });
+
+        const remainingIds = new Set(activeCommitteeList.map((c) => c.id));
+        const currentStoreCommittee = electionStore.getCommittee(period.id);
+        currentStoreCommittee.forEach((orig) => {
+          if (!remainingIds.has(orig.id)) {
+            electionStore.deleteCommitteeMember(orig.id);
+          }
+        });
+
+        syncedCommitteeList = activeCommitteeList.map((c) => {
+          const exists = currentStoreCommittee.find((orig) => orig.id === c.id);
+          if (exists) {
+            electionStore.updateCommitteeMember(c.id, {
+              memberName: c.memberName,
+              role: c.role as any,
+              className: c.className,
+              duties: c.duties,
+              skNumber: skSnapshot.skNumber,
+              skDate: skSnapshot.skDate,
+            });
+            return c;
+          } else if (c.memberName.trim()) {
+            const created = electionStore.addCommitteeMember({
+              id: c.id,
+              electionPeriodId: period.id,
+              memberName: c.memberName.trim(),
+              role: c.role as any,
+              className: c.className,
+              duties: c.duties,
+              skNumber: skSnapshot.skNumber,
+              skDate: skSnapshot.skDate,
+              email: `${c.memberName.toLowerCase().replace(/\s+/g, '')}@sekolah.id`,
+            });
+            if (created.id !== c.id) {
+              idChanged = true;
+            }
+            return { ...c, id: created.id };
+          }
+          return c;
+        });
+      },
+      'Admin Sekolah',
+      'SYNC_UPDATE'
+    );
+
+    const committedPayload = {
+      skNumber: skSnapshot.skNumber,
+      skDate: skSnapshot.skDate,
+      skCity: skSnapshot.skCity,
+      kopBarLine1: skSnapshot.kopBarLine1,
+      kopBarLine2: skSnapshot.kopBarLine2,
+      showKopLine2: skSnapshot.showKopLine2,
+      schoolCustomName: skSnapshot.schoolCustomName,
+      schoolAddressText: skSnapshot.schoolAddressText,
+      schoolPostalCode: skSnapshot.schoolPostalCode,
+      schoolPhoneText: skSnapshot.schoolPhoneText,
+      schoolEmailText: skSnapshot.schoolEmailText,
+      schoolWebsiteText: skSnapshot.schoolWebsiteText,
+      schoolNpsnText: skSnapshot.schoolNpsnText,
+      principalName: skSnapshot.principalName,
+      principalNip: skSnapshot.principalNip,
+      principalRank: skSnapshot.principalRank,
+      supervisorName: skSnapshot.supervisorName,
+      supervisorRole: skSnapshot.supervisorRole,
+      supervisorNip: skSnapshot.supervisorNip,
+      eventName: skSnapshot.eventName,
+      eventTheme: skSnapshot.eventTheme,
+      academicYear: skSnapshot.academicYear,
+      eventDateText: skSnapshot.eventDateText,
+      eventTimeText: skSnapshot.eventTimeText,
+      eventLocation: skSnapshot.eventLocation,
+      menimbangList: skSnapshot.menimbangList,
+      mengingatList: skSnapshot.mengingatList,
+      memperhatikanText: skSnapshot.memperhatikanText,
+      diktumMenetapkan: skSnapshot.diktumMenetapkan,
+      diktumKesatu: skSnapshot.diktumKesatu,
+      diktumKedua: skSnapshot.diktumKedua,
+      diktumKetiga: skSnapshot.diktumKetiga,
+      diktumKeempat: skSnapshot.diktumKeempat,
+      pages: skSnapshot.pages,
+      showQrCode: skSnapshot.showQrCode,
+      showStamp: skSnapshot.showStamp,
+      showWatermark: skSnapshot.showWatermark,
+      committeeList: syncedCommitteeList,
+    };
+
+    lastSavedSignatureRef.current = JSON.stringify(committedPayload);
+    isUserDirtyRef.current = false;
+    clearFormDraft(skDraftKey);
+    if (idChanged) {
+      setCommitteeList(syncedCommitteeList);
+    }
+    setHasUnsavedChanges(false);
+
+    if (options?.showSuccessToast) {
+      showToast(options.showSuccessToast);
+    }
+  };
+
+  persistLatestRef.current = persistSkChangesToStore;
+
+  const handleClose = () => {
+    if (autoSaveTimerRef.current) {
+      clearTimeout(autoSaveTimerRef.current);
+      autoSaveTimerRef.current = null;
+    }
+    if (isUserDirtyRef.current) {
+      persistLatestRef.current();
+    }
+    onClose();
+  };
+
+  // Hydrate strictly newer remote SK or Kop Surat updates only when user has no active dirty edits
+  useEffect(() => {
+    if (isUserDirtyRef.current || showManualKopModal || showEditStampModal || editingClassMemberId !== null) {
+      return;
+    }
+
+    const remoteSk = school.skConfigsByPeriod?.[period.id];
+    const remoteUpdatedMs = remoteSk?.updatedAt ? Date.parse(remoteSk.updatedAt) || 0 : 0;
+    const localUpdatedMs = lastCommittedUpdatedAtRef.current
+      ? Date.parse(lastCommittedUpdatedAtRef.current) || 0
+      : 0;
+
+    if (remoteSk && remoteUpdatedMs > localUpdatedMs && remoteSk.updatedAt !== lastCommittedUpdatedAtRef.current) {
+      lastCommittedUpdatedAtRef.current = remoteSk.updatedAt;
+      const hydratedPayload = {
+        skNumber: remoteSk.skNumber,
+        skDate: remoteSk.skDate,
+        skCity: remoteSk.skCity,
+        kopBarLine1: remoteSk.kopBarLine1,
+        kopBarLine2: remoteSk.kopBarLine2,
+        showKopLine2: remoteSk.showKopLine2,
+        schoolCustomName: remoteSk.schoolCustomName,
+        schoolAddressText: remoteSk.schoolAddressText,
+        schoolPostalCode: remoteSk.schoolPostalCode,
+        schoolPhoneText: remoteSk.schoolPhoneText,
+        schoolEmailText: remoteSk.schoolEmailText,
+        schoolWebsiteText: remoteSk.schoolWebsiteText,
+        schoolNpsnText: remoteSk.schoolNpsnText,
+        principalName: remoteSk.principalName,
+        principalNip: remoteSk.principalNip,
+        principalRank: remoteSk.principalRank,
+        supervisorName: remoteSk.supervisorName,
+        supervisorRole: remoteSk.supervisorRole,
+        supervisorNip: remoteSk.supervisorNip,
+        eventName: remoteSk.eventName,
+        eventTheme: remoteSk.eventTheme,
+        academicYear: remoteSk.academicYear,
+        eventDateText: remoteSk.eventDateText,
+        eventTimeText: remoteSk.eventTimeText,
+        eventLocation: remoteSk.eventLocation,
+        menimbangList: remoteSk.menimbangList,
+        mengingatList: remoteSk.mengingatList,
+        memperhatikanText: remoteSk.memperhatikanText,
+        diktumMenetapkan: remoteSk.diktumMenetapkan,
+        diktumKesatu: remoteSk.diktumKesatu,
+        diktumKedua: remoteSk.diktumKedua,
+        diktumKetiga: remoteSk.diktumKetiga,
+        diktumKeempat: remoteSk.diktumKeempat,
+        pages: remoteSk.pages,
+        showQrCode: remoteSk.showQrCode,
+        showStamp: remoteSk.showStamp,
+        showWatermark: remoteSk.showWatermark,
+        committeeList,
+      };
+      lastSavedSignatureRef.current = JSON.stringify(hydratedPayload);
+
+      setSkNumber(remoteSk.skNumber);
+      setSkDate(remoteSk.skDate);
+      setSkCity(remoteSk.skCity);
+      setKopBarLine1(remoteSk.kopBarLine1);
+      setKopBarLine2(remoteSk.kopBarLine2);
+      setShowKopLine2(remoteSk.showKopLine2);
+      setAgencyProvince(remoteSk.kopBarLine1);
+      setAgencyDept(remoteSk.kopBarLine2);
+      setSchoolCustomName(remoteSk.schoolCustomName);
+      setSchoolAddressText(remoteSk.schoolAddressText);
+      setSchoolPostalCode(remoteSk.schoolPostalCode);
+      setSchoolPhoneText(remoteSk.schoolPhoneText);
+      setSchoolEmailText(remoteSk.schoolEmailText);
+      setSchoolWebsiteText(remoteSk.schoolWebsiteText);
+      setSchoolNpsnText(remoteSk.schoolNpsnText);
+      setPrincipalName(remoteSk.principalName);
+      setPrincipalNip(remoteSk.principalNip);
+      setPrincipalRank(remoteSk.principalRank);
+      setSupervisorName(remoteSk.supervisorName);
+      setSupervisorRole(remoteSk.supervisorRole);
+      setSupervisorNip(remoteSk.supervisorNip);
+      setEventName(remoteSk.eventName);
+      setEventTheme(remoteSk.eventTheme);
+      setAcademicYear(remoteSk.academicYear);
+      setEventDateText(remoteSk.eventDateText);
+      setEventTimeText(remoteSk.eventTimeText);
+      setEventLocation(remoteSk.eventLocation);
+      setMenimbangList(remoteSk.menimbangList);
+      setMengingatList(remoteSk.mengingatList);
+      setMemperhatikanText(remoteSk.memperhatikanText);
+      setDiktumMenetapkan(remoteSk.diktumMenetapkan);
+      setDiktumKesatu(remoteSk.diktumKesatu);
+      setDiktumKedua(remoteSk.diktumKedua);
+      setDiktumKetiga(remoteSk.diktumKetiga);
+      setDiktumKeempat(remoteSk.diktumKeempat);
+      if (remoteSk.pages && remoteSk.pages.length > 0) {
+        setPages(remoteSk.pages);
+      }
+      setShowQrCode(remoteSk.showQrCode);
+      setShowStamp(remoteSk.showStamp);
+      setShowWatermark(remoteSk.showWatermark);
+      return;
+    }
+
+    if (school.kopBarLine1 !== undefined) {
+      const nextKop1 = school.kopBarLine1;
+      const nextKop2 = school.kopBarLine2 !== undefined ? school.kopBarLine2 : kopBarLine2;
+      const nextShow2 = school.showKopLine2 !== undefined ? school.showKopLine2 : showKopLine2;
+      if (nextKop1 !== kopBarLine1 || nextKop2 !== kopBarLine2 || nextShow2 !== showKopLine2) {
+        const syncedPayload = {
+          ...buildSkDraftPayload(),
+          kopBarLine1: nextKop1,
+          kopBarLine2: nextKop2,
+          showKopLine2: nextShow2,
+        };
+        lastSavedSignatureRef.current = JSON.stringify(syncedPayload);
+        setKopBarLine1(nextKop1);
+        setAgencyProvince(nextKop1);
+        setKopBarLine2(nextKop2);
+        setAgencyDept(nextKop2);
+        setShowKopLine2(nextShow2);
+      }
+    }
+  }, [
+    school.skConfigsByPeriod,
+    school.kopBarLine1,
+    school.kopBarLine2,
+    school.showKopLine2,
+    period.id,
+    showManualKopModal,
+    showEditStampModal,
+    editingClassMemberId,
+  ]);
+
+  // Real-time draft persistence + debounced auto-save to store & central server
+  useEffect(() => {
+    if (currentSkSignature === lastSavedSignatureRef.current) {
+      isUserDirtyRef.current = false;
+      setHasUnsavedChanges(false);
+      return;
+    }
+
+    isUserDirtyRef.current = true;
+    setHasUnsavedChanges(true);
+    saveFormDraft(skDraftKey, currentSkDraftPayload);
+
+    if (autoSaveTimerRef.current) {
+      clearTimeout(autoSaveTimerRef.current);
+    }
+    autoSaveTimerRef.current = setTimeout(() => {
+      persistLatestRef.current();
+    }, 450);
+
+    return () => {
+      if (autoSaveTimerRef.current) {
+        clearTimeout(autoSaveTimerRef.current);
+      }
+    };
+  }, [skDraftKey, currentSkSignature]);
 
   // Format Indonesian date
   const formattedSkDate = (() => {
@@ -636,7 +1172,7 @@ export const PrintSkPanitia: React.FC<PrintSkPanitiaProps> = ({
   // --- COMMITTEE HANDLERS ---
   const handleAddCommitteeMember = () => {
     const newMember: EditableCommitteeMember = {
-      id: `comm_new_${Date.now()}`,
+      id: `comm_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
       role: 'Seksi Pembantu Umum',
       memberName: '',
       className: 'Kelas VIII',
@@ -649,6 +1185,36 @@ export const PrintSkPanitia: React.FC<PrintSkPanitiaProps> = ({
     setCommitteeList((prev) =>
       prev.map((c) => (c.id === id ? { ...c, ...updates } : c))
     );
+  };
+
+  const handleStartEditInlineClass = (member: EditableCommitteeMember) => {
+    setEditingClassMemberId(member.id);
+    setEditingClassDraft(member.className || '');
+  };
+
+  const handleCancelInlineClass = () => {
+    setEditingClassMemberId(null);
+    setEditingClassDraft('');
+  };
+
+  const handleSaveInlineClass = (memberId: string) => {
+    const trimmed = editingClassDraft.trim();
+    if (!trimmed) {
+      showToast('Kelas / Unsur tidak boleh kosong.');
+      return;
+    }
+
+    const updatedCommittee = committeeList.map((c) =>
+      c.id === memberId ? { ...c, className: trimmed } : c
+    );
+    setCommitteeList(updatedCommittee);
+    setEditingClassMemberId(null);
+    setEditingClassDraft('');
+
+    persistSkChangesToStore({
+      overrideCommitteeList: updatedCommittee,
+      showSuccessToast: `Kelas / Unsur berhasil diperbarui menjadi "${trimmed}" & disimpan permanen!`,
+    });
   };
 
   const handleDeleteCommitteeMember = (id: string) => {
@@ -768,85 +1334,17 @@ export const PrintSkPanitia: React.FC<PrintSkPanitiaProps> = ({
 
   // --- SAVE & SYNC TO SYSTEM STORE ---
   const handleSaveAndSync = () => {
-    const savedLogo = saveKopLogoConfig(currentLogoConfig);
-    setSavedLogoConfig(savedLogo);
-    const savedStamp = saveStampConfig(
-      {
-        headerText: stampHeaderText,
-        institutionText: stampInstitutionText,
-        footerText: stampFooterText,
-        sizePx: stampSizePx,
-        rotationDeg: stampRotationDeg,
-        offsetX: stampOffsetX,
-        offsetY: stampOffsetY,
-        colorTheme: stampColorTheme,
-        signatoryTitle,
-      },
-      schoolCustomName
-    );
-    // 1. Update School Info in store
-    electionStore.updateSchool({
-      name: schoolCustomName.trim() || school.name,
-      principalName: principalName.trim(),
-      principalNip: principalNip.trim(),
-      city: skCity.trim(),
-      address: schoolAddressText.trim(),
-      postalCode: schoolPostalCode.trim(),
-      phone: schoolPhoneText.trim(),
-      email: schoolEmailText.trim(),
-      website: schoolWebsiteText.trim(),
-      npsn: schoolNpsnText.trim(),
-      logoUrl: schoolLogoUrl.trim(),
-      osisLogoUrl: osisLogoUrl.trim(),
-      kopLogoConfig: savedLogo,
-      stampConfig: savedStamp,
+    persistSkChangesToStore({
+      showSuccessToast: 'Seluruh perubahan teks SK, acara, dan data Panitia berhasil disimpan permanen & tersinkronisasi!',
     });
+  };
 
-    // 2. Update Period details if needed
-    electionStore.updatePeriod(period.id, {
-      periodName: eventName.trim(),
-      academicYear: academicYear.trim(),
+  // --- SAVE MANUAL KOP MODAL ---
+  const handleSaveManualKop = () => {
+    persistSkChangesToStore({
+      showSuccessToast: 'Teks Bar Kop Surat & dokumen SK berhasil disimpan permanen & disinkronkan!',
     });
-
-    // 3. Update committee in store (upsert remaining & remove deleted original members)
-    const remainingIds = new Set(committeeList.map((c) => c.id));
-    const currentStoreCommittee = electionStore.getCommittee(period.id);
-    if (currentStoreCommittee.length > 0) {
-      currentStoreCommittee.forEach((orig) => {
-        if (!remainingIds.has(orig.id)) {
-          electionStore.deleteCommitteeMember(orig.id);
-        }
-      });
-    }
-
-    const syncedCommitteeList = committeeList.map((c) => {
-      const exists = currentStoreCommittee.find((orig) => orig.id === c.id);
-      if (exists) {
-        electionStore.updateCommitteeMember(c.id, {
-          memberName: c.memberName,
-          role: c.role as any,
-          className: c.className,
-          skNumber: skNumber,
-          skDate: skDate,
-        });
-        return c;
-      } else if (c.memberName.trim()) {
-        const created = electionStore.addCommitteeMember({
-          electionPeriodId: period.id,
-          memberName: c.memberName.trim(),
-          role: c.role as any,
-          className: c.className,
-          skNumber: skNumber,
-          skDate: skDate,
-          email: `${c.memberName.toLowerCase().replace(/\s+/g, '')}@sekolah.id`,
-        });
-        return { ...c, id: created.id };
-      }
-      return c;
-    });
-    setCommitteeList(syncedCommitteeList);
-
-    showToast('Seluruh perubahan SK, acara, dan data Panitia berhasil disimpan & disinkronkan ke sistem!');
+    setShowManualKopModal(false);
   };
 
   // --- RESET TO OFFICIAL TEMPLATE ---
@@ -859,23 +1357,103 @@ export const PrintSkPanitia: React.FC<PrintSkPanitiaProps> = ({
       variant: 'warning',
     });
     if (!confirmed) return;
+
+    const resetCity = school.city || 'Kota Administrasi';
+    const resetPrincipalName = school.principalName || 'Dra. Hj. Nurul Hidayah, M.Pd';
+    const resetPrincipalNip = school.principalNip || '19780512 200212 1 003';
+    const resetPrincipalRank = 'Pembina Utama Muda / IV-c';
+    const resetSupervisorName = 'Drs. Bambang Sudarsono, M.Pd';
+    const resetSupervisorRole = `Wakasek Kesiswaan & Pembina ${school.type}`;
+    const resetSupervisorNip = '19820315 200604 1 008';
+    const resetKop1 = initialKopLine1;
+    const resetKop2 = 'DINAS PENDIDIKAN DAN KEBUDAYAAN';
+    const resetPostal = school.postalCode || '10330';
+    const resetEmail = school.email || 'info@sekolah.sch.id';
+
     setSkNumber(defaultSkNum);
     setSkDate(defaultSkDate);
-    setSkCity(school.city || 'Kota Administrasi');
-    setPrincipalName(school.principalName || 'Dra. Hj. Nurul Hidayah, M.Pd');
-    setPrincipalNip(school.principalNip || '19780512 200212 1 003');
-    setKopBarLine1(initialKopLine1);
-    setKopBarLine2('DINAS PENDIDIKAN DAN KEBUDAYAAN');
+    setSkCity(resetCity);
+    setPrincipalName(resetPrincipalName);
+    setPrincipalNip(resetPrincipalNip);
+    setPrincipalRank(resetPrincipalRank);
+    setSupervisorName(resetSupervisorName);
+    setSupervisorRole(resetSupervisorRole);
+    setSupervisorNip(resetSupervisorNip);
+    setKopBarLine1(resetKop1);
+    setKopBarLine2(resetKop2);
     setShowKopLine2(true);
-    setAgencyProvince(initialKopLine1);
-    setAgencyDept('DINAS PENDIDIKAN DAN KEBUDAYAAN');
-    setSchoolPostalCode(school.postalCode || '10330');
-    setSchoolEmailText(school.email || 'info@sekolah.sch.id');
-    setEventName(period.periodName || `Pemilihan Umum Ketua dan Wakil Ketua ${school.type} (PILKETOS)`);
-    setAcademicYear(period.academicYear || `${new Date().getFullYear()}/${new Date().getFullYear() + 1}`);
+    setAgencyProvince(resetKop1);
+    setAgencyDept(resetKop2);
+    setSchoolCustomName(school.name);
+    setSchoolAddressText(school.address);
+    setSchoolPostalCode(resetPostal);
+    setSchoolPhoneText(school.phone);
+    setSchoolEmailText(resetEmail);
+    setSchoolWebsiteText(school.website);
+    setSchoolNpsnText(school.npsn);
+    setEventName(defaultEventName);
+    setEventTheme(defaultEventTheme);
+    setAcademicYear(defaultAcademicYear);
+    setEventDateText(defaultEventDateText);
+    setEventTimeText(defaultEventTimeText);
+    setEventLocation(defaultEventLocation);
+    setMenimbangList(defaultMenimbangList);
+    setMengingatList(defaultMengingatList);
+    setMemperhatikanText(defaultMemperhatikanText);
+    setDiktumMenetapkan(defaultDiktumMenetapkan);
+    setDiktumKesatu(defaultDiktumKesatu);
+    setDiktumKedua(defaultDiktumKedua);
+    setDiktumKetiga(defaultDiktumKetiga);
+    setDiktumKeempat(defaultDiktumKeempat);
+    setShowQrCode(true);
+    setShowStamp(true);
+    setShowWatermark(false);
     setCommitteeList(defaultCommitteeItems);
     setPages(initialPages);
-    showToast('Template SK berhasil dikembalikan ke format kedinasan awal.');
+
+    persistSkChangesToStore({
+      overrideCommitteeList: defaultCommitteeItems,
+      overrideConfig: {
+        skNumber: defaultSkNum,
+        skDate: defaultSkDate,
+        skCity: resetCity,
+        kopBarLine1: resetKop1,
+        kopBarLine2: resetKop2,
+        showKopLine2: true,
+        schoolCustomName: school.name,
+        schoolAddressText: school.address,
+        schoolPostalCode: resetPostal,
+        schoolPhoneText: school.phone,
+        schoolEmailText: resetEmail,
+        schoolWebsiteText: school.website,
+        schoolNpsnText: school.npsn,
+        principalName: resetPrincipalName,
+        principalNip: resetPrincipalNip,
+        principalRank: resetPrincipalRank,
+        supervisorName: resetSupervisorName,
+        supervisorRole: resetSupervisorRole,
+        supervisorNip: resetSupervisorNip,
+        eventName: defaultEventName,
+        eventTheme: defaultEventTheme,
+        academicYear: defaultAcademicYear,
+        eventDateText: defaultEventDateText,
+        eventTimeText: defaultEventTimeText,
+        eventLocation: defaultEventLocation,
+        menimbangList: defaultMenimbangList,
+        mengingatList: defaultMengingatList,
+        memperhatikanText: defaultMemperhatikanText,
+        diktumMenetapkan: defaultDiktumMenetapkan,
+        diktumKesatu: defaultDiktumKesatu,
+        diktumKedua: defaultDiktumKedua,
+        diktumKetiga: defaultDiktumKetiga,
+        diktumKeempat: defaultDiktumKeempat,
+        pages: initialPages,
+        showQrCode: true,
+        showStamp: true,
+        showWatermark: false,
+      },
+      showSuccessToast: 'Template SK berhasil dikembalikan ke format kedinasan awal.',
+    });
   };
 
   // Helper roman numerals
@@ -929,7 +1507,7 @@ export const PrintSkPanitia: React.FC<PrintSkPanitiaProps> = ({
           </button>
           <button
             type="button"
-            onClick={onClose}
+            onClick={handleClose}
             className="p-1 text-slate-400 hover:text-white cursor-pointer"
             title="Tutup"
           >
@@ -990,6 +1568,21 @@ export const PrintSkPanitia: React.FC<PrintSkPanitiaProps> = ({
                 <span>Menu Edit SK & Acara</span>
               </button>
             </div>
+
+            {/* Save All Text Changes Button */}
+            <button
+              type="button"
+              onClick={handleSaveAndSync}
+              className={`px-3.5 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer ${
+                hasUnsavedChanges
+                  ? 'bg-amber-400 hover:bg-amber-500 text-slate-950 shadow-md shadow-amber-400/30 animate-pulse'
+                  : 'bg-purple-600 hover:bg-purple-700 text-white shadow-sm shadow-purple-600/25'
+              }`}
+              title="Simpan Permanen seluruh perubahan teks SK, Kop Surat, Acara & Panitia"
+            >
+              <Save className="w-3.5 h-3.5" />
+              <span>{hasUnsavedChanges ? 'Simpan Perubahan*' : 'Simpan SK'}</span>
+            </button>
 
             {/* Pure Document Mode Button */}
             <button
@@ -1061,7 +1654,7 @@ export const PrintSkPanitia: React.FC<PrintSkPanitiaProps> = ({
             {/* Close Button */}
             <button
               type="button"
-              onClick={onClose}
+              onClick={handleClose}
               className="p-2 rounded-xl glass-button text-slate-500 hover:text-slate-900 transition-colors cursor-pointer"
               title="Tutup Jendela"
             >
@@ -2531,7 +3124,68 @@ export const PrintSkPanitia: React.FC<PrintSkPanitiaProps> = ({
                                 {m.memberName || '(Belum Diisi)'}
                               </td>
                               <td className="p-2.5 text-center border-r border-slate-300 font-medium">
-                                {m.className}
+                                {editingClassMemberId === m.id ? (
+                                  <>
+                                    <span className="hidden print:inline">{m.className || '-'}</span>
+                                    <div className="no-print flex items-center justify-center gap-1">
+                                      <input
+                                        type="text"
+                                        value={editingClassDraft}
+                                        onChange={(e) => setEditingClassDraft(e.target.value)}
+                                        onKeyDown={(e) => {
+                                          if (e.key === 'Enter') {
+                                            e.preventDefault();
+                                            handleSaveInlineClass(m.id);
+                                          } else if (e.key === 'Escape') {
+                                            e.preventDefault();
+                                            handleCancelInlineClass();
+                                          }
+                                        }}
+                                        placeholder="Kelas / Unsur"
+                                        aria-label={`Edit kelas ${m.memberName || m.role}`}
+                                        autoFocus
+                                        className="w-24 px-2 py-1 text-xs text-center font-sans font-medium text-slate-900 bg-white border border-purple-400 rounded-md focus:outline-none focus:ring-2 focus:ring-purple-500/40"
+                                      />
+                                      <button
+                                        type="button"
+                                        onClick={() => handleSaveInlineClass(m.id)}
+                                        className="p-1 rounded bg-emerald-600 hover:bg-emerald-700 text-white cursor-pointer transition-colors shrink-0"
+                                        title="Simpan Kelas"
+                                        aria-label="Simpan Kelas"
+                                      >
+                                        <Check className="w-3 h-3" />
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={handleCancelInlineClass}
+                                        className="p-1 rounded bg-slate-200 hover:bg-slate-300 text-slate-700 cursor-pointer transition-colors shrink-0"
+                                        title="Batal Edit Kelas"
+                                        aria-label="Batal Edit Kelas"
+                                      >
+                                        <X className="w-3 h-3" />
+                                      </button>
+                                    </div>
+                                  </>
+                                ) : (
+                                  <div className="inline-flex items-center justify-center gap-1 group/classcell">
+                                    <span
+                                      onClick={() => handleStartEditInlineClass(m)}
+                                      className="cursor-pointer hover:text-purple-800 hover:underline underline-offset-2 decoration-purple-400 print:no-underline"
+                                      title="Klik untuk edit kelas / unsur"
+                                    >
+                                      {m.className || '-'}
+                                    </span>
+                                    <button
+                                      type="button"
+                                      onClick={() => handleStartEditInlineClass(m)}
+                                      className="no-print p-1 rounded text-purple-600 hover:text-purple-800 hover:bg-purple-100/80 opacity-75 group-hover/classcell:opacity-100 transition-all cursor-pointer"
+                                      title="Edit Kelas / Unsur"
+                                      aria-label={`Edit kelas ${m.memberName || m.role}`}
+                                    >
+                                      <Edit3 className="w-3 h-3" />
+                                    </button>
+                                  </div>
+                                )}
                               </td>
                               <td className="p-2.5 text-[11px] text-slate-600">
                                 {m.duties || getDutyDescription(m.role)}
@@ -3056,14 +3710,11 @@ export const PrintSkPanitia: React.FC<PrintSkPanitiaProps> = ({
               </button>
               <button
                 type="button"
-                onClick={() => {
-                  setShowManualKopModal(false);
-                  showToast('Teks Bar Kop Surat berhasil diperbarui!');
-                }}
+                onClick={handleSaveManualKop}
                 className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-bold text-slate-900 bg-amber-400 hover:bg-amber-500 rounded-xl shadow-xs transition-all cursor-pointer"
               >
                 <Check className="w-3.5 h-3.5" />
-                <span>Terapkan Perubahan</span>
+                <span>Simpan &amp; Terapkan</span>
               </button>
             </div>
           </div>
