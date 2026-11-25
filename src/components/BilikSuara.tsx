@@ -19,7 +19,7 @@ import { SchoolConfig, Candidate, Voter, ElectionPeriod, RealtimeSyncMetadata } 
 import { electionStore } from '../lib/store';
 import { CandidateAvatar, SchoolCrestLogo } from './CandidateAvatar';
 import { CandidateVideoDisplay } from './CandidateVideoDisplay';
-import { formatAppTimeDisplay } from '../lib/realtimeSync';
+import { formatAppTimeDisplay, evaluateVotingSchedule } from '../lib/realtimeSync';
 import { GarudaIcon } from './GarudaIcon';
 
 interface BilikSuaraProps {
@@ -51,22 +51,34 @@ export const BilikSuara: React.FC<BilikSuaraProps> = ({ school, appTimeMs, syncM
   const [candidates, setCandidates] = useState<Candidate[]>(() =>
     electionStore.getCandidates(electionStore.getActivePeriod().id)
   );
+  const [voters, setVoters] = useState<Voter[]>(() =>
+    electionStore.getVoters(electionStore.getActivePeriod().id)
+  );
   const [selectedCandidate, setSelectedCandidate] = useState<Candidate | null>(null);
   const [previewCandidate, setPreviewCandidate] = useState<Candidate | null>(null);
   const [receiptCode, setReceiptCode] = useState('');
   const [countdown, setCountdown] = useState(5);
+  const [isAuthenticating, setIsAuthenticating] = useState(false);
+  const [isSubmittingVote, setIsSubmittingVote] = useState(false);
 
   const formattedClock = formatAppTimeDisplay(appTimeMs);
+  const scheduleStatus = evaluateVotingSchedule(activePeriod, appTimeMs);
+  const quickFillVoters = useMemo(
+    () => voters.filter((v) => !v.hasVoted && Boolean(v.pinPlain)).slice(0, 3),
+    [voters]
+  );
 
-  // Subscribe to real-time updates from Admin/Panitia so candidates & activePeriod stay live in Bilik Suara
+  // Subscribe to real-time updates from Admin/Panitia so candidates, voters & activePeriod stay live in Bilik Suara
   useEffect(() => {
     const syncBoothData = () => {
       const period = electionStore.getActivePeriod();
       const latestCandidates = electionStore.getCandidates(period.id);
+      const latestVoters = electionStore.getVoters(period.id);
       setActivePeriod(period);
       setCandidates(latestCandidates);
+      setVoters(latestVoters);
       setSelectedCandidate((prev) =>
-        prev ? latestCandidates.find((c) => c.id === prev.id) || prev : null
+        prev ? latestCandidates.find((c) => c.id === prev.id) || null : null
       );
       setPreviewCandidate((prev) =>
         prev ? latestCandidates.find((c) => c.id === prev.id) || null : null
@@ -77,6 +89,38 @@ export const BilikSuara: React.FC<BilikSuaraProps> = ({ school, appTimeMs, syncM
     const unsubscribe = electionStore.subscribe(syncBoothData);
     return () => unsubscribe();
   }, []);
+
+  // Guard mid-session if Admin switches active period or Panitia deletes/marks voter as voted from another device
+  useEffect(() => {
+    if ((step !== 'BALLOT' && step !== 'CONFIRM') || !authenticatedVoter) return;
+
+    if (activePeriod.id !== authenticatedVoter.electionPeriodId) {
+      setStep('AUTH');
+      setAuthenticatedVoter(null);
+      setSelectedCandidate(null);
+      setPreviewCandidate(null);
+      setErrorMessage('Periode pemilihan aktif telah diubah oleh Administrator. Silakan login kembali sesuai periode aktif.');
+      return;
+    }
+
+    const latestVoter = voters.find((v) => v.id === authenticatedVoter.id);
+    if (!latestVoter) {
+      setStep('AUTH');
+      setAuthenticatedVoter(null);
+      setSelectedCandidate(null);
+      setPreviewCandidate(null);
+      setErrorMessage('Data pemilih Anda telah dihapus atau diperbarui Panitia. Silakan hubungi panitia bilik.');
+      return;
+    }
+
+    if (latestVoter.hasVoted) {
+      setStep('AUTH');
+      setAuthenticatedVoter(null);
+      setSelectedCandidate(null);
+      setPreviewCandidate(null);
+      setErrorMessage('Hak suara untuk NISN ini telah tercatat masuk dari perangkat atau sesi lain.');
+    }
+  }, [step, authenticatedVoter, activePeriod.id, voters]);
 
   // 5-second countdown timer on SUCCESS screen
   useEffect(() => {
@@ -112,19 +156,25 @@ export const BilikSuara: React.FC<BilikSuaraProps> = ({ school, appTimeMs, syncM
     });
   }, [step]);
 
-  const handleLogin = (e: React.FormEvent) => {
+  const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isAuthenticating) return;
     setErrorMessage('');
+    setIsAuthenticating(true);
 
-    const res = electionStore.verifyVoterLogin(nisn, pin);
-    if (!res.success) {
-      setErrorMessage(res.message);
-      return;
+    try {
+      const res = await electionStore.verifyVoterLoginOnline(nisn, pin);
+      if (!res.success) {
+        setErrorMessage(res.message);
+        return;
+      }
+
+      setAuthenticatedVoter(res.voter!);
+      setActivePeriod(res.activePeriod!);
+      setStep('BALLOT');
+    } finally {
+      setIsAuthenticating(false);
     }
-
-    setAuthenticatedVoter(res.voter!);
-    setActivePeriod(res.activePeriod!);
-    setStep('BALLOT');
   };
 
   const handleSelectCandidate = (candidate: Candidate) => {
@@ -132,29 +182,37 @@ export const BilikSuara: React.FC<BilikSuaraProps> = ({ school, appTimeMs, syncM
     setStep('CONFIRM');
   };
 
-  const handleConfirmVote = () => {
-    if (!authenticatedVoter || !selectedCandidate) return;
+  const handleConfirmVote = async () => {
+    if (!authenticatedVoter || !selectedCandidate || isSubmittingVote) return;
+    setIsSubmittingVote(true);
 
-    const res = electionStore.submitAnonymousVote(authenticatedVoter.id, selectedCandidate.id);
-    if (!res.success) {
-      setErrorMessage(res.message);
-      setStep('BALLOT');
-      return;
-    }
-
-    setReceiptCode(res.receiptCode || 'VERIFIED');
-    setStep('SUCCESS');
-    setCountdown(5);
-
-    // Trigger celebratory canvas-confetti
     try {
-      confetti({
-        particleCount: 80,
-        spread: 70,
-        origin: { y: 0.6 },
-      });
-    } catch {
-      // Fallback
+      const res = await electionStore.submitAnonymousVoteOnline(
+        authenticatedVoter.id,
+        selectedCandidate.id
+      );
+      if (!res.success) {
+        setErrorMessage(res.message);
+        setStep('BALLOT');
+        return;
+      }
+
+      setReceiptCode(res.receiptCode || 'VERIFIED');
+      setStep('SUCCESS');
+      setCountdown(5);
+
+      // Trigger celebratory canvas-confetti
+      try {
+        confetti({
+          particleCount: 80,
+          spread: 70,
+          origin: { y: 0.6 },
+        });
+      } catch {
+        // Fallback
+      }
+    } finally {
+      setIsSubmittingVote(false);
     }
   };
 
@@ -185,7 +243,27 @@ export const BilikSuara: React.FC<BilikSuaraProps> = ({ school, appTimeMs, syncM
           </div>
         </div>
 
-        <div className="flex items-center gap-2.5">
+        <div className="flex flex-wrap items-center gap-2.5">
+          <span
+            className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-[11px] font-bold border ${
+              scheduleStatus.state === 'OPEN'
+                ? 'bg-emerald-50 text-emerald-800 border-emerald-200'
+                : scheduleStatus.state === 'BEFORE_OPEN'
+                ? 'bg-amber-50 text-amber-800 border-amber-200'
+                : 'bg-slate-100 text-slate-700 border-slate-200'
+            }`}
+          >
+            <span
+              className={`w-1.5 h-1.5 rounded-full ${
+                scheduleStatus.state === 'OPEN'
+                  ? 'bg-emerald-500 animate-pulse'
+                  : scheduleStatus.state === 'BEFORE_OPEN'
+                  ? 'bg-amber-500'
+                  : 'bg-slate-400'
+              }`}
+            />
+            <span>{scheduleStatus.label}</span>
+          </span>
           <div className="hidden sm:flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-slate-900/90 text-white text-xs font-mono font-bold shadow-xs">
             <Clock className="w-3.5 h-3.5 text-sky-400" />
             <span>{formattedClock.timeString} WIB</span>
@@ -300,51 +378,47 @@ export const BilikSuara: React.FC<BilikSuaraProps> = ({ school, appTimeMs, syncM
                 </p>
               </div>
 
-              {/* Sample Hint Buttons for quick demo testing */}
+              {/* Dynamic Quick-Fill Hint Buttons synced directly with active period DPT */}
               <div className="pt-2">
-                <p className="text-[11px] font-bold text-slate-500 mb-2">
-                  Bantuan Cepat Simulasi (Pilih Akun Demo Belum Memilih):
-                </p>
-                <div className="flex flex-wrap gap-1.5">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setNisn('0111234004');
-                      setPin('R6T2CY');
-                    }}
-                    className="text-[11px] px-3 py-1.5 glass-button rounded-xl text-slate-700 font-mono font-bold cursor-pointer"
-                  >
-                    Cantika (VII A)
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setNisn('0111234007');
-                      setPin('M2G7VP');
-                    }}
-                    className="text-[11px] px-3 py-1.5 glass-button rounded-xl text-slate-700 font-mono font-bold cursor-pointer"
-                  >
-                    Farel (VII B)
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setNisn('0101234016');
-                      setPin('T7P4WD');
-                    }}
-                    className="text-[11px] px-3 py-1.5 glass-button rounded-xl text-slate-700 font-mono font-bold cursor-pointer"
-                  >
-                    Olivia (VIII C)
-                  </button>
-                </div>
+                {quickFillVoters.length > 0 ? (
+                  <>
+                    <p className="text-[11px] font-bold text-slate-500 mb-2">
+                      Bantuan Cepat Simulasi (Ambil Akun DPT Belum Memilih):
+                    </p>
+                    <div className="flex flex-wrap gap-1.5">
+                      {quickFillVoters.map((v) => (
+                        <button
+                          key={v.id}
+                          type="button"
+                          onClick={() => {
+                            setNisn(v.nisn);
+                            setPin(v.pinPlain || '');
+                          }}
+                          className="text-[11px] px-3 py-1.5 glass-button rounded-xl text-slate-700 font-mono font-bold cursor-pointer"
+                        >
+                          {v.fullName.split(' ')[0]} ({v.className})
+                        </button>
+                      ))}
+                    </div>
+                  </>
+                ) : voters.length === 0 ? (
+                  <div className="p-3 rounded-xl bg-amber-50/80 border border-amber-200 text-amber-900 text-[11px] font-medium">
+                    Belum ada siswa terdaftar di DPT periode aktif ({activePeriod?.periodName}). Silakan tambahkan DPT melalui Portal Panitia terlebih dahulu.
+                  </div>
+                ) : (
+                  <div className="p-3 rounded-xl bg-emerald-50/80 border border-emerald-200 text-emerald-900 text-[11px] font-medium">
+                    Seluruh {voters.length} siswa di DPT periode ini telah menyalurkan hak suaranya atau belum memiliki PIN aktif.
+                  </div>
+                )}
               </div>
 
               <button
                 type="submit"
-                className="w-full mt-4 py-3.5 rounded-2xl bg-gradient-to-r from-sky-500 to-indigo-600 hover:from-sky-400 hover:to-indigo-500 text-white font-black text-sm shadow-xl shadow-sky-500/25 transition-all flex items-center justify-center gap-2 cursor-pointer transform hover:scale-101 active:scale-99"
+                disabled={isAuthenticating}
+                className="w-full mt-4 py-3.5 rounded-2xl bg-gradient-to-r from-sky-500 to-indigo-600 hover:from-sky-400 hover:to-indigo-500 text-white font-black text-sm shadow-xl shadow-sky-500/25 transition-all flex items-center justify-center gap-2 cursor-pointer transform hover:scale-101 active:scale-99 disabled:opacity-70 disabled:cursor-wait"
               >
-                <span>Buka Surat Suara Digital</span>
-                <ArrowRight className="w-4 h-4" />
+                <span>{isAuthenticating ? 'Memverifikasi dengan Server...' : 'Buka Surat Suara Digital'}</span>
+                {!isAuthenticating && <ArrowRight className="w-4 h-4" />}
               </button>
             </form>
           </div>
@@ -357,7 +431,7 @@ export const BilikSuara: React.FC<BilikSuaraProps> = ({ school, appTimeMs, syncM
           {/* Official Ballot Header in Frosted Glass */}
           <div className="rounded-3xl glass-panel border-2 border-slate-900/80 p-6 md:p-8 shadow-xl text-center relative overflow-hidden">
             <div className="flex flex-col items-center">
-              <SchoolCrestLogo size={48} type={school.type} className="mb-2 shadow-sm" />
+              <SchoolCrestLogo size={48} type={school.type} logoUrl={school.logoUrl} className="mb-2 shadow-sm" />
               <h1 className="text-xl md:text-2xl font-black uppercase tracking-wider text-slate-900">
                 SURAT SUARA PEMILIHAN KETUA & WAKIL KETUA {school.type}
               </h1>
@@ -379,6 +453,15 @@ export const BilikSuara: React.FC<BilikSuaraProps> = ({ school, appTimeMs, syncM
           </div>
 
           {/* Ballot Columns Grid in Frosted Glass Cards */}
+          {candidates.length === 0 ? (
+            <div className="rounded-3xl glass-panel border border-white/80 p-8 text-center space-y-2">
+              <AlertCircle className="w-8 h-8 text-amber-500 mx-auto" />
+              <h3 className="text-sm font-extrabold text-slate-900">Belum Ada Pasangan Calon Terdaftar</h3>
+              <p className="text-xs text-slate-500">
+                Panitia belum menambahkan Pasangan Calon untuk periode {activePeriod?.periodName}. Hubungi panitia pemilihan untuk melengkapi data paslon.
+              </p>
+            </div>
+          ) : (
           <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
             {candidates.map((cand) => (
               <div
@@ -456,6 +539,7 @@ export const BilikSuara: React.FC<BilikSuaraProps> = ({ school, appTimeMs, syncM
               </div>
             ))}
           </div>
+          )}
         </div>
       )}
 
@@ -608,18 +692,20 @@ export const BilikSuara: React.FC<BilikSuaraProps> = ({ school, appTimeMs, syncM
             <div className="grid grid-cols-2 gap-3 pt-2">
               <button
                 type="button"
+                disabled={isSubmittingVote}
                 onClick={() => setStep('BALLOT')}
-                className="py-2.5 px-4 rounded-xl border border-slate-300 hover:bg-slate-50 text-slate-700 font-semibold text-xs transition-colors cursor-pointer"
+                className="py-2.5 px-4 rounded-xl border border-slate-300 hover:bg-slate-50 text-slate-700 font-semibold text-xs transition-colors cursor-pointer disabled:opacity-50"
               >
                 Kembali Periksa
               </button>
               <button
                 type="button"
+                disabled={isSubmittingVote}
                 onClick={handleConfirmVote}
-                className="py-2.5 px-4 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs shadow transition-colors flex items-center justify-center gap-1.5 cursor-pointer"
+                className="py-2.5 px-4 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs shadow transition-colors flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-70 disabled:cursor-wait"
               >
                 <Check className="w-4 h-4" />
-                <span>Ya, Kirimkan Pilihan</span>
+                <span>{isSubmittingVote ? 'Mengirim ke Server Live...' : 'Ya, Kirimkan Pilihan'}</span>
               </button>
             </div>
           </div>
@@ -725,7 +811,7 @@ export const BilikSuara: React.FC<BilikSuaraProps> = ({ school, appTimeMs, syncM
               </div>
               <div className="flex items-center justify-between text-xs text-slate-500">
                 <span>Waktu Rekap</span>
-                <span className="font-mono text-slate-900">{new Date().toLocaleTimeString('id-ID')} WIB</span>
+                <span className="font-mono text-slate-900">{formattedClock.timeString} WIB</span>
               </div>
             </motion.div>
 

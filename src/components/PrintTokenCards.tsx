@@ -29,7 +29,10 @@ export const PrintTokenCards: React.FC<PrintTokenCardsProps> = ({
 }) => {
   const [zoomScale, setZoomScale] = useState<number>(100);
   const [showCutLines, setShowCutLines] = useState<boolean>(true);
+  const [hideVoted, setHideVoted] = useState<boolean>(false);
   const [onlyDocumentMode, setOnlyDocumentMode] = useState<boolean>(false);
+
+  const displayedVoters = hideVoted ? voters.filter((v) => !v.hasVoted) : voters;
 
   // Isolate preview & print from all other DOM objects (#root, canvas, navbar)
   useEffect(() => {
@@ -90,7 +93,7 @@ export const PrintTokenCards: React.FC<PrintTokenCardsProps> = ({
                     Menu Preview Sebelum Cetak
                   </span>
                   <span className="text-[10px] font-bold text-slate-500 font-mono">
-                    {voters.length} Kartu Pemilih · Bebas Objek Lain
+                    {displayedVoters.length} Kartu Pemilih · Bebas Objek Lain
                   </span>
                 </div>
                 <h2 className="text-base font-black text-slate-900 tracking-tight mt-0.5">
@@ -166,15 +169,26 @@ export const PrintTokenCards: React.FC<PrintTokenCardsProps> = ({
               </div>
             </div>
 
-            <label className="flex items-center gap-1.5 font-semibold text-slate-700 cursor-pointer">
-              <input
-                type="checkbox"
-                checked={showCutLines}
-                onChange={(e) => setShowCutLines(e.target.checked)}
-                className="rounded text-sky-600 focus:ring-sky-500 cursor-pointer"
-              />
-              <span>Tampilkan Garis Putus-Putus Potong Kartu</span>
-            </label>
+            <div className="flex flex-wrap items-center gap-4">
+              <label className="flex items-center gap-1.5 font-semibold text-slate-700 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={showCutLines}
+                  onChange={(e) => setShowCutLines(e.target.checked)}
+                  className="rounded text-sky-600 focus:ring-sky-500 cursor-pointer"
+                />
+                <span>Tampilkan Garis Putus-Putus Potong Kartu</span>
+              </label>
+              <label className="flex items-center gap-1.5 font-semibold text-slate-700 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={hideVoted}
+                  onChange={(e) => setHideVoted(e.target.checked)}
+                  className="rounded text-sky-600 focus:ring-sky-500 cursor-pointer"
+                />
+                <span>Tampilkan PIN Aktif Saja (Belum Memilih)</span>
+              </label>
+            </div>
           </div>
         </div>
       )}
@@ -185,8 +199,13 @@ export const PrintTokenCards: React.FC<PrintTokenCardsProps> = ({
         style={{ transform: zoomScale !== 100 ? `scale(${zoomScale / 100})` : 'none' }}
       >
         <div className="print-document-sheet bg-white p-6 md:p-10 rounded-none sm:rounded-lg shadow-2xl border border-slate-300 print:p-0 print:m-0 print:shadow-none print:border-none print:max-w-none">
-          <div className="grid grid-cols-1 md:grid-cols-2 print:grid-cols-2 gap-4">
-            {voters.map((voter) => (
+          {displayedVoters.length === 0 ? (
+            <div className="p-10 text-center border-2 border-dashed border-slate-300 rounded-2xl text-slate-500 text-sm">
+              Tidak ada kartu pemilih yang memenuhi kriteria cetak saat ini.
+            </div>
+          ) : (
+            <div className="grid grid-cols-1 md:grid-cols-2 print:grid-cols-2 gap-4">
+              {displayedVoters.map((voter) => (
               <div
                 key={voter.id}
                 className={`${
@@ -255,9 +274,15 @@ export const PrintTokenCards: React.FC<PrintTokenCardsProps> = ({
                     <span className="text-[9px] uppercase font-bold text-slate-500">
                       TOKEN PIN RAHASIA:
                     </span>
-                    <div className="text-lg font-black tracking-widest text-slate-950 font-mono bg-amber-50 px-3 py-0.5 rounded border border-amber-300 inline-block ml-2">
-                      {voter.pinPlain || '******'}
-                    </div>
+                    {voter.hasVoted ? (
+                      <div className="text-xs font-black tracking-wide text-emerald-800 font-mono bg-emerald-50 px-2.5 py-1 rounded border border-emerald-300 inline-block ml-2">
+                        SUDAH MEMILIH (TOKEN HANGUS)
+                      </div>
+                    ) : (
+                      <div className="text-lg font-black tracking-widest text-slate-950 font-mono bg-amber-50 px-3 py-0.5 rounded border border-amber-300 inline-block ml-2">
+                        {voter.pinPlain || '******'}
+                      </div>
+                    )}
                   </div>
                   <div className="text-right">
                     <span className="text-[8px] text-slate-400 block">Gunakan di Bilik Suara</span>
@@ -272,8 +297,9 @@ export const PrintTokenCards: React.FC<PrintTokenCardsProps> = ({
                   </div>
                 )}
               </div>
-            ))}
-          </div>
+              ))}
+            </div>
+          )}
         </div>
       </div>
     </div>,

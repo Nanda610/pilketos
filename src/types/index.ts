@@ -26,6 +26,7 @@ export interface SchoolConfig {
   osisLogoUrl?: string;
   openingVideoUrl?: string;
   openingVideoTitle?: string;
+  openingVideoEnabled?: boolean;
   email?: string;
   kopLogoConfig?: {
     schoolLogoWidth: number;
@@ -157,6 +158,7 @@ export interface ElectionSummary {
   totalVoted: number;
   totalUnvoted: number;
   participationPercentage: number;
+  abstainPercentage?: number;
   candidatesResults: {
     candidate: Candidate;
     voteCount: number;
@@ -170,8 +172,16 @@ export interface ElectionSummary {
   }[];
 }
 
+export interface DeletedEntityTombstones {
+  periods?: string[];
+  candidates?: string[];
+  voters?: string[];
+  committee?: string[];
+}
+
 export interface ElectionStateSnapshot {
   revision: number;
+  epochId?: string;
   updatedAt: string;
   updatedBy: string;
   lastAction: string;
@@ -184,6 +194,7 @@ export interface ElectionStateSnapshot {
   committee: CommitteeMember[];
   auditLogs: AuditLog[];
   accounts?: UserAccount[];
+  tombstones?: DeletedEntityTombstones;
 }
 
 export interface RealtimeSyncMetadata {

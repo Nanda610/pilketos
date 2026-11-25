@@ -12,7 +12,7 @@ import {
   Building2, Calendar, FileCheck, ShieldAlert, Award, Plus, 
   CheckCircle2, Clock, Archive, Printer, RotateCcw, Save, X,
   AlertTriangle, KeyRound, Trash2, Film, Upload, Play, FileVideo, Video, FileText, Radio, RefreshCw,
-  ShieldCheck, Lock, UserCheck, Eye, EyeOff
+  ShieldCheck, Lock, UserCheck, Eye, EyeOff, Edit, Users, Vote
 } from 'lucide-react';
 import { SchoolConfig, ElectionPeriod, CommitteeMember, AuditLog, ElectionSummary, RealtimeSyncMetadata } from '../types';
 import { electionStore } from '../lib/store';
@@ -23,6 +23,57 @@ import { SchoolCrestLogo, OsisLogoBadge } from './CandidateAvatar';
 import { formatAppTimeDisplay } from '../lib/realtimeSync';
 import { GarudaIcon } from './GarudaIcon';
 import { BloggerIcon } from './BloggerIcon';
+import { useAppDialog } from './ConfirmDialog';
+import {
+  DRAFT_KEYS,
+  clearFormDraft,
+  formatDraftTimestamp,
+  loadFormDraft,
+  saveFormDraft,
+} from '../lib/formDrafts';
+
+const ADMIN_ACTIVE_TAB_KEY = 'epilketos_admin_active_tab';
+
+interface NewPeriodFormValues {
+  periodName: string;
+  academicYear: string;
+  startDate: string;
+  endDate: string;
+  votingOpenTime: string;
+  votingCloseTime: string;
+  status: 'draft' | 'active' | 'completed';
+  description: string;
+}
+
+interface NewPeriodDraftState {
+  isOpen: boolean;
+  newPeriod: NewPeriodFormValues;
+  copyFromExisting: boolean;
+  copySourcePeriodId: string;
+  copyOptions: {
+    copyVoters: boolean;
+    copyCandidates: boolean;
+    copyCommittee: boolean;
+    copyVotes?: boolean;
+  };
+}
+
+interface EditPeriodDraftState {
+  isOpen: boolean;
+  period: ElectionPeriod;
+}
+
+interface NewCommitteeDraftState {
+  isOpen: boolean;
+  form: {
+    skNumber: string;
+    skDate: string;
+    memberName: string;
+    role: CommitteeMember['role'];
+    className: string;
+    email: string;
+  };
+}
 
 interface AdminDashboardProps {
   school: SchoolConfig;
@@ -45,17 +96,68 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   syncMeta,
   onOpenShareBlogger,
 }) => {
-  const [activeTab, setActiveTab] = useState<'periods' | 'school' | 'committee' | 'audit' | 'video' | 'security' | 'blogger'>('periods');
-  const [showNewPeriodModal, setShowNewPeriodModal] = useState(false);
-  const [showAddCommitteeModal, setShowAddCommitteeModal] = useState(false);
+  const initialSchoolDraft = loadFormDraft<SchoolConfig>(DRAFT_KEYS.ADMIN_SCHOOL_FORM);
+  const initialNewPeriodDraft = loadFormDraft<NewPeriodDraftState>(DRAFT_KEYS.ADMIN_NEW_PERIOD);
+  const initialEditPeriodDraft = loadFormDraft<EditPeriodDraftState>(DRAFT_KEYS.ADMIN_EDIT_PERIOD);
+  const initialCommitteeDraft = loadFormDraft<NewCommitteeDraftState>(DRAFT_KEYS.ADMIN_NEW_COMMITTEE);
+  const initialVideoUrlDraft = loadFormDraft<string>(DRAFT_KEYS.ADMIN_VIDEO_URL);
+  const initialClockInputDraft = loadFormDraft<string>(DRAFT_KEYS.ADMIN_CLOCK_INPUT);
+
+  const [activeTab, setActiveTab] = useState<'periods' | 'school' | 'committee' | 'audit' | 'video' | 'security' | 'blogger'>(() => {
+    if (typeof window !== 'undefined') {
+      try {
+        const savedTab = sessionStorage.getItem(ADMIN_ACTIVE_TAB_KEY);
+        if (
+          savedTab === 'periods' ||
+          savedTab === 'school' ||
+          savedTab === 'committee' ||
+          savedTab === 'audit' ||
+          savedTab === 'video' ||
+          savedTab === 'security' ||
+          savedTab === 'blogger'
+        ) {
+          return savedTab;
+        }
+      } catch {}
+    }
+    return 'periods';
+  });
+
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      try {
+        sessionStorage.setItem(ADMIN_ACTIVE_TAB_KEY, activeTab);
+      } catch {}
+    }
+  }, [activeTab]);
+
+  const [showNewPeriodModal, setShowNewPeriodModal] = useState<boolean>(
+    () => Boolean(initialNewPeriodDraft?.data?.isOpen)
+  );
+  const [newPeriodDraftRestoredAt, setNewPeriodDraftRestoredAt] = useState<number | null>(
+    () => (initialNewPeriodDraft?.data?.isOpen ? initialNewPeriodDraft.updatedAt : null)
+  );
+  const [editingPeriod, setEditingPeriod] = useState<ElectionPeriod | null>(
+    () => (initialEditPeriodDraft?.data?.isOpen ? initialEditPeriodDraft.data.period : null)
+  );
+  const [showAddCommitteeModal, setShowAddCommitteeModal] = useState<boolean>(
+    () => Boolean(initialCommitteeDraft?.data?.isOpen)
+  );
+  const [committeeDraftRestoredAt, setCommitteeDraftRestoredAt] = useState<number | null>(
+    () => (initialCommitteeDraft?.data?.isOpen ? initialCommitteeDraft.updatedAt : null)
+  );
   const [showBahpModal, setShowBahpModal] = useState(false);
   const [selectedBahpPeriodId, setSelectedBahpPeriodId] = useState<string | null>(null);
+  const [selectedCommitteePeriodId, setSelectedCommitteePeriodId] = useState<string>(summary.period.id);
   const [showSkModal, setShowSkModal] = useState(false);
   const [confirmDeletePeriod, setConfirmDeletePeriod] = useState<ElectionPeriod | null>(null);
   const [alertNotice, setAlertNotice] = useState<string | null>(null);
-  const [customTimeInput, setCustomTimeInput] = useState<string>('08:00');
+  const [customTimeInput, setCustomTimeInput] = useState<string>(
+    () => initialClockInputDraft?.data || '08:00'
+  );
+  const { dialogNode, confirmDialog } = useAppDialog();
 
-  // Account & security credentials form state
+  // Account & security credentials form state (never persisted to localStorage for security)
   const [adminNewPass, setAdminNewPass] = useState('');
   const [adminConfirmPass, setAdminConfirmPass] = useState('');
   const [panitiaNewPass, setPanitiaNewPass] = useState('');
@@ -72,6 +174,16 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     return () => unsub();
   }, []);
 
+  useEffect(() => {
+    setSelectedCommitteePeriodId(summary.period.id);
+  }, [summary.period.id]);
+
+  const activeCommitteePeriod = periods.find((p) => p.id === selectedCommitteePeriodId) || summary.period;
+  const displayedCommittee =
+    activeCommitteePeriod.id === summary.period.id
+      ? committee
+      : electionStore.getCommittee(activeCommitteePeriod.id);
+
   const formattedClock = formatAppTimeDisplay(appTimeMs);
 
   const handleOpenBahpModal = (periodId?: string) => {
@@ -80,72 +192,193 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     setShowBahpModal(true);
   };
 
-  // Opening video state
+  // Opening video state (auto-restored from localStorage if edited)
   const [showOpeningPreview, setShowOpeningPreview] = useState(false);
-  const [openingVideoInputUrl, setOpeningVideoInputUrl] = useState(school.openingVideoUrl || '');
+  const [openingVideoInputUrl, setOpeningVideoInputUrl] = useState<string>(
+    () => (initialVideoUrlDraft ? initialVideoUrlDraft.data : school.openingVideoUrl || '')
+  );
+  const [isVideoUrlDraftEdited, setIsVideoUrlDraftEdited] = useState<boolean>(
+    () => Boolean(initialVideoUrlDraft)
+  );
   const [isUploadingVideo, setIsUploadingVideo] = useState(false);
 
-  // School form state with user-edit protection (prevents polling re-renders from overwriting typed inputs)
-  const [schoolForm, setSchoolForm] = useState<SchoolConfig>(school);
-  const [isSchoolFormEdited, setIsSchoolFormEdited] = useState(false);
+  // School form state with user-edit protection + localStorage draft recovery
+  const [schoolForm, setSchoolForm] = useState<SchoolConfig>(
+    () => initialSchoolDraft?.data || school
+  );
+  const [isSchoolFormEdited, setIsSchoolFormEdited] = useState<boolean>(
+    () => Boolean(initialSchoolDraft)
+  );
+  const [schoolDraftRestoredAt, setSchoolDraftRestoredAt] = useState<number | null>(
+    () => initialSchoolDraft?.updatedAt || null
+  );
 
   useEffect(() => {
     if (!isSchoolFormEdited) {
       setSchoolForm(school);
+    }
+    if (!isVideoUrlDraftEdited) {
       setOpeningVideoInputUrl(school.openingVideoUrl || '');
     }
-  }, [school, isSchoolFormEdited]);
+  }, [school, isSchoolFormEdited, isVideoUrlDraftEdited]);
 
   const updateSchoolFormField = (field: keyof SchoolConfig, value: any) => {
     setIsSchoolFormEdited(true);
-    setSchoolForm((prev) => ({ ...prev, [field]: value }));
+    setSchoolForm((prev) => {
+      const next = { ...prev, [field]: value };
+      saveFormDraft<SchoolConfig>(DRAFT_KEYS.ADMIN_SCHOOL_FORM, next);
+      return next;
+    });
   };
 
   const handleSaveSchool = (e: React.FormEvent) => {
     e.preventDefault();
     const cleanForm: SchoolConfig = {
       ...schoolForm,
-      name: schoolForm.name.trim() || 'SMP ISLAM YASPAI',
+      name: schoolForm.name.trim() || school.name || 'SMP ISLAM YASPAI',
       type: schoolForm.type || 'OSIS',
-      npsn: schoolForm.npsn || '20519118',
-      address: schoolForm.address || 'Jl. Cangkringmalang.',
-      city: schoolForm.city || 'Kab. Pasuruan',
-      province: schoolForm.province || 'Jawatimur',
-      principalName: schoolForm.principalName || 'Nanang Supriyanto, S.Pd.',
+      npsn: schoolForm.npsn.trim(),
+      address: schoolForm.address.trim(),
+      city: schoolForm.city.trim(),
+      province: schoolForm.province.trim(),
+      principalName: schoolForm.principalName.trim(),
     };
     setSchoolForm(cleanForm);
     setIsSchoolFormEdited(false);
+    setSchoolDraftRestoredAt(null);
+    clearFormDraft(DRAFT_KEYS.ADMIN_SCHOOL_FORM);
     electionStore.updateSchool(cleanForm);
     showAlert('Konfigurasi identitas lembaga berhasil disimpan & disinkronkan ke seluruh sistem!');
   };
 
   const handleCancelSchoolEdits = () => {
+    clearFormDraft(DRAFT_KEYS.ADMIN_SCHOOL_FORM);
     setSchoolForm(school);
     setIsSchoolFormEdited(false);
-    showAlert('Perubahan identitas dibatalkan.');
+    setSchoolDraftRestoredAt(null);
+    showAlert('Draf perubahan identitas dibuang dan dikembalikan ke data tersimpan.');
   };
 
-  // New period state
-  const [newPeriod, setNewPeriod] = useState({
-    periodName: 'Pemilihan Umum Ketua OSIS SMP 2027/2028',
-    academicYear: '2027/2028',
-    startDate: '2027-09-15',
-    endDate: '2027-09-15',
+  // New period state (auto-restored from localStorage draft if available)
+  const createDefaultNewPeriod = (): NewPeriodFormValues => ({
+    periodName: '',
+    academicYear: `${new Date().getFullYear()}/${new Date().getFullYear() + 1}`,
+    startDate: new Date().toISOString().slice(0, 10),
+    endDate: new Date().toISOString().slice(0, 10),
     votingOpenTime: '07:30',
     votingCloseTime: '15:00',
-    status: 'draft' as 'draft' as 'draft' | 'active' | 'completed',
-    description: 'Periode pemilihan baru jenjang SMP',
+    status: 'draft',
+    description: '',
   });
+  const [newPeriod, setNewPeriod] = useState<NewPeriodFormValues>(
+    () => initialNewPeriodDraft?.data?.newPeriod || createDefaultNewPeriod()
+  );
+  const [copyFromExisting, setCopyFromExisting] = useState<boolean>(
+    () =>
+      initialNewPeriodDraft?.data
+        ? Boolean(initialNewPeriodDraft.data.copyFromExisting)
+        : true
+  );
+  const getDefaultCopySourcePeriodId = () => {
+    const activeStats = summary.period?.id ? electionStore.getPeriodStats(summary.period.id) : null;
+    if (activeStats && (activeStats.votersCount > 0 || activeStats.candidatesCount > 0 || activeStats.committeeCount > 0)) {
+      return summary.period.id;
+    }
+    const populated = periods.find((p) => {
+      const s = electionStore.getPeriodStats(p.id);
+      return s.votersCount > 0 || s.candidatesCount > 0 || s.committeeCount > 0;
+    });
+    return populated?.id || summary.period?.id || periods[0]?.id || '';
+  };
+  const [copySourcePeriodId, setCopySourcePeriodId] = useState<string>(
+    () => initialNewPeriodDraft?.data?.copySourcePeriodId || getDefaultCopySourcePeriodId()
+  );
 
-  // Committee member form state
-  const [newMember, setNewMember] = useState({
+  useEffect(() => {
+    if (periods.length > 0 && !periods.some((p) => p.id === copySourcePeriodId)) {
+      setCopySourcePeriodId(getDefaultCopySourcePeriodId());
+    }
+  }, [periods, copySourcePeriodId]);
+  const [copyOptions, setCopyOptions] = useState<{
+    copyVoters: boolean;
+    copyCandidates: boolean;
+    copyCommittee: boolean;
+    copyVotes: boolean;
+  }>(() => ({
+    copyVoters: initialNewPeriodDraft?.data?.copyOptions?.copyVoters ?? true,
+    copyCandidates: initialNewPeriodDraft?.data?.copyOptions?.copyCandidates ?? true,
+    copyCommittee: initialNewPeriodDraft?.data?.copyOptions?.copyCommittee ?? true,
+    copyVotes: initialNewPeriodDraft?.data?.copyOptions?.copyVotes ?? false,
+  }));
+
+  // Committee member form state (auto-restored from localStorage draft if available)
+  const createDefaultCommitteeMember = (): NewCommitteeDraftState['form'] => ({
     skNumber: '035/SK-KS/SMPN1/VIII/2026',
     skDate: '2026-08-15',
     memberName: '',
-    role: 'Pengawas / Saksi' as CommitteeMember['role'],
+    role: 'Pengawas / Saksi',
     className: 'IX A',
     email: '',
   });
+  const [newMember, setNewMember] = useState<NewCommitteeDraftState['form']>(
+    () => initialCommitteeDraft?.data?.form || createDefaultCommitteeMember()
+  );
+
+  // Auto-save New Period modal form inputs to localStorage
+  useEffect(() => {
+    const hasTypedPeriod =
+      Boolean(newPeriod.periodName.trim()) ||
+      Boolean(newPeriod.description.trim()) ||
+      copyFromExisting;
+
+    if (showNewPeriodModal || hasTypedPeriod) {
+      saveFormDraft<NewPeriodDraftState>(DRAFT_KEYS.ADMIN_NEW_PERIOD, {
+        isOpen: showNewPeriodModal,
+        newPeriod,
+        copyFromExisting,
+        copySourcePeriodId,
+        copyOptions,
+      });
+    }
+  }, [showNewPeriodModal, newPeriod, copyFromExisting, copySourcePeriodId, copyOptions]);
+
+  // Auto-save Edit Period modal inputs to localStorage
+  useEffect(() => {
+    if (editingPeriod) {
+      saveFormDraft<EditPeriodDraftState>(DRAFT_KEYS.ADMIN_EDIT_PERIOD, {
+        isOpen: true,
+        period: editingPeriod,
+      });
+    }
+  }, [editingPeriod]);
+
+  // Auto-save Add Committee modal inputs to localStorage
+  useEffect(() => {
+    const hasTypedCommittee =
+      Boolean(newMember.memberName.trim()) ||
+      Boolean(newMember.email.trim());
+
+    if (showAddCommitteeModal || hasTypedCommittee) {
+      saveFormDraft<NewCommitteeDraftState>(DRAFT_KEYS.ADMIN_NEW_COMMITTEE, {
+        isOpen: showAddCommitteeModal,
+        form: newMember,
+      });
+    }
+  }, [showAddCommitteeModal, newMember]);
+
+  // Auto-save Opening Video URL input to localStorage
+  useEffect(() => {
+    if (isVideoUrlDraftEdited) {
+      saveFormDraft<string>(DRAFT_KEYS.ADMIN_VIDEO_URL, openingVideoInputUrl);
+    }
+  }, [isVideoUrlDraftEdited, openingVideoInputUrl]);
+
+  // Auto-save Clock input to localStorage
+  useEffect(() => {
+    if (customTimeInput && customTimeInput !== '08:00') {
+      saveFormDraft<string>(DRAFT_KEYS.ADMIN_CLOCK_INPUT, customTimeInput);
+    }
+  }, [customTimeInput]);
 
   const showAlert = (msg: string) => {
     setAlertNotice(msg);
@@ -176,7 +409,11 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     const reader = new FileReader();
     reader.onload = (event) => {
       const dataUrl = event.target?.result as string;
-      setSchoolForm((prev) => ({ ...prev, osisLogoUrl: dataUrl }));
+      setSchoolForm((prev) => {
+        const next = { ...prev, osisLogoUrl: dataUrl };
+        if (isSchoolFormEdited) saveFormDraft<SchoolConfig>(DRAFT_KEYS.ADMIN_SCHOOL_FORM, next);
+        return next;
+      });
       electionStore.updateSchool({ osisLogoUrl: dataUrl });
       showAlert(`Logo ${schoolForm.type} berhasil diunggah dan disimpan!`);
     };
@@ -193,7 +430,11 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     const reader = new FileReader();
     reader.onload = (event) => {
       const dataUrl = event.target?.result as string;
-      setSchoolForm((prev) => ({ ...prev, logoUrl: dataUrl }));
+      setSchoolForm((prev) => {
+        const next = { ...prev, logoUrl: dataUrl };
+        if (isSchoolFormEdited) saveFormDraft<SchoolConfig>(DRAFT_KEYS.ADMIN_SCHOOL_FORM, next);
+        return next;
+      });
       electionStore.updateSchool({ logoUrl: dataUrl });
       showAlert('Logo lambang sekolah berhasil diunggah!');
     };
@@ -201,8 +442,15 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   };
 
 
-  const handleActivatePeriod = (periodId: string) => {
-    if (confirm('Aktifkan periode ini? Periode lain yang sedang aktif akan otomatis ditandai sebagai selesai/arsip.')) {
+  const handleActivatePeriod = async (periodId: string) => {
+    const confirmed = await confirmDialog({
+      title: 'Aktifkan Periode Pemilihan',
+      message: 'Aktifkan periode ini? Periode lain yang sedang aktif akan otomatis ditandai sebagai selesai/arsip.',
+      confirmText: 'Aktifkan',
+      cancelText: 'Batal',
+      variant: 'info',
+    });
+    if (confirmed) {
       electionStore.setActivePeriod(periodId);
       showAlert('Periode pemilihan telah diaktifkan.');
     }
@@ -214,28 +462,139 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     showAlert(res.message);
   };
 
+  const handleOpenNewPeriodModal = () => {
+    const savedDraft = loadFormDraft<NewPeriodDraftState>(DRAFT_KEYS.ADMIN_NEW_PERIOD);
+    if (savedDraft?.data) {
+      setNewPeriod(savedDraft.data.newPeriod);
+      setCopyFromExisting(savedDraft.data.copyFromExisting);
+      setCopySourcePeriodId(savedDraft.data.copySourcePeriodId || getDefaultCopySourcePeriodId());
+      setCopyOptions({
+        copyVoters: savedDraft.data.copyOptions?.copyVoters ?? true,
+        copyCandidates: savedDraft.data.copyOptions?.copyCandidates ?? true,
+        copyCommittee: savedDraft.data.copyOptions?.copyCommittee ?? true,
+        copyVotes: savedDraft.data.copyOptions?.copyVotes ?? false,
+      });
+      setNewPeriodDraftRestoredAt(savedDraft.updatedAt);
+    } else {
+      setNewPeriod(createDefaultNewPeriod());
+      setCopyFromExisting(true);
+      setCopySourcePeriodId(getDefaultCopySourcePeriodId());
+      setCopyOptions({ copyVoters: true, copyCandidates: true, copyCommittee: true, copyVotes: false });
+      setNewPeriodDraftRestoredAt(null);
+    }
+    setShowNewPeriodModal(true);
+  };
+
+  const handleDiscardNewPeriodDraft = () => {
+    clearFormDraft(DRAFT_KEYS.ADMIN_NEW_PERIOD);
+    setNewPeriodDraftRestoredAt(null);
+    setNewPeriod(createDefaultNewPeriod());
+    setCopyFromExisting(true);
+    setCopyOptions({ copyVoters: true, copyCandidates: true, copyCommittee: true, copyVotes: false });
+    setShowNewPeriodModal(false);
+  };
+
+  const handleResetNewPeriodFormOnly = () => {
+    clearFormDraft(DRAFT_KEYS.ADMIN_NEW_PERIOD);
+    setNewPeriodDraftRestoredAt(null);
+    setNewPeriod(createDefaultNewPeriod());
+    setCopyFromExisting(true);
+    setCopySourcePeriodId(getDefaultCopySourcePeriodId());
+    setCopyOptions({ copyVoters: true, copyCandidates: true, copyCommittee: true, copyVotes: false });
+  };
+
   const handleCreatePeriod = (e: React.FormEvent) => {
     e.preventDefault();
-    electionStore.addPeriod({
-      schoolId: school.id,
-      ...newPeriod,
-    });
+    const cleanName = newPeriod.periodName.trim();
+    const cleanYear = newPeriod.academicYear.trim();
+    if (!cleanName || !cleanYear) {
+      showAlert('Nama periode dan tahun ajaran wajib diisi.');
+      return;
+    }
+    const created = electionStore.addPeriod(
+      {
+        schoolId: school.id,
+        ...newPeriod,
+        periodName: cleanName,
+        academicYear: cleanYear,
+        endDate: newPeriod.endDate || newPeriod.startDate,
+        description: newPeriod.description.trim() || `Jadwal pemungutan suara: ${newPeriod.startDate} (${newPeriod.votingOpenTime} - ${newPeriod.votingCloseTime} WIB)`,
+      },
+      copyFromExisting && copySourcePeriodId
+        ? {
+            copyFromPeriodId: copySourcePeriodId,
+            copyVoters: copyOptions.copyVoters,
+            copyCandidates: copyOptions.copyCandidates,
+            copyCommittee: copyOptions.copyCommittee,
+            copyVotes: copyOptions.copyVotes && copyOptions.copyVoters && copyOptions.copyCandidates,
+          }
+        : undefined
+    );
+    clearFormDraft(DRAFT_KEYS.ADMIN_NEW_PERIOD);
+    setNewPeriodDraftRestoredAt(null);
     setShowNewPeriodModal(false);
-    showAlert(`Periode ${newPeriod.periodName} berhasil dibuat.`);
+    setNewPeriod(createDefaultNewPeriod());
+    setCopyFromExisting(true);
+    setCopyOptions({ copyVoters: true, copyCandidates: true, copyCommittee: true, copyVotes: false });
+    showAlert(
+      `Periode "${created.periodName}" berhasil dibuat dan tersimpan permanen! Data DPT & PIN, Pasangan Calon, Suara Masuk, Belum Memilih, dan Panitia SK tetap terjaga utuh.`
+    );
+  };
+
+  const handleSaveEditPeriod = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!editingPeriod) return;
+    electionStore.updatePeriod(editingPeriod.id, {
+      periodName: editingPeriod.periodName.trim(),
+      academicYear: editingPeriod.academicYear.trim(),
+      startDate: editingPeriod.startDate,
+      endDate: editingPeriod.endDate || editingPeriod.startDate,
+      votingOpenTime: editingPeriod.votingOpenTime,
+      votingCloseTime: editingPeriod.votingCloseTime,
+      description: editingPeriod.description,
+    });
+    const editedName = editingPeriod.periodName;
+    clearFormDraft(DRAFT_KEYS.ADMIN_EDIT_PERIOD);
+    setEditingPeriod(null);
+    showAlert(`Periode "${editedName}" berhasil diperbarui. Seluruh DPT & PIN serta Paslon di dalamnya tetap terjaga.`);
   };
 
   const handleAddCommittee = (e: React.FormEvent) => {
     e.preventDefault();
     electionStore.addCommitteeMember({
-      electionPeriodId: summary.period.id,
+      electionPeriodId: activeCommitteePeriod.id,
       ...newMember,
     });
+    clearFormDraft(DRAFT_KEYS.ADMIN_NEW_COMMITTEE);
+    setCommitteeDraftRestoredAt(null);
     setShowAddCommitteeModal(false);
-    showAlert(`Anggota panitia ${newMember.memberName} berhasil ditambahkan.`);
+    showAlert(`Anggota panitia ${newMember.memberName} berhasil ditambahkan pada periode ${activeCommitteePeriod.periodName}.`);
+    setNewMember(createDefaultCommitteeMember());
   };
 
-  const handleResetSample = () => {
-    if (confirm('PERINGATAN: Apakah Anda yakin ingin menyetel ulang database ke data simulasi awal? Semua perubahan uji coba akan dikembalikan.')) {
+  const handleDeleteCommitteeMember = async (member: CommitteeMember) => {
+    const confirmed = await confirmDialog({
+      title: 'Hapus Anggota Panitia SK',
+      message: `Apakah Anda yakin ingin menghapus ${member.memberName} (${member.role}) dari daftar SK Panitia periode ${activeCommitteePeriod.periodName}?`,
+      confirmText: 'Hapus Anggota',
+      cancelText: 'Batal',
+      variant: 'danger',
+    });
+    if (confirmed) {
+      electionStore.deleteCommitteeMember(member.id);
+      showAlert(`Anggota panitia ${member.memberName} berhasil dihapus dari SK.`);
+    }
+  };
+
+  const handleResetSample = async () => {
+    const confirmed = await confirmDialog({
+      title: 'Setel Ulang Database Simulasi',
+      message: 'PERINGATAN: Apakah Anda yakin ingin menyetel ulang database ke data simulasi awal? Semua perubahan uji coba akan dikembalikan.',
+      confirmText: 'Setel Ulang',
+      cancelText: 'Batal',
+      variant: 'danger',
+    });
+    if (confirmed) {
       electionStore.resetToSampleData();
       showAlert('Database berhasil disetel ulang ke dataset simulasi awal.');
     }
@@ -281,8 +640,15 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     }
   };
 
-  const handleResetCredentialsDefault = () => {
-    if (confirm('Kembalikan kata sandi Admin dan Panitia ke setelan awal (admin123 / panitia123)?')) {
+  const handleResetCredentialsDefault = async () => {
+    const confirmed = await confirmDialog({
+      title: 'Kembalikan Kata Sandi Bawaan',
+      message: 'Kembalikan kata sandi Admin dan Panitia ke setelan awal (admin123 / panitia123)?',
+      confirmText: 'Kembalikan',
+      cancelText: 'Batal',
+      variant: 'warning',
+    });
+    if (confirmed) {
       electionStore.resetAccountsToDefault('Admin Sekolah');
       showAlert('Akun dan kata sandi berhasil dikembalikan ke setelan default.');
     }
@@ -292,6 +658,8 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     electionStore.updateSchool({
       openingVideoUrl: url.trim(),
     });
+    clearFormDraft(DRAFT_KEYS.ADMIN_VIDEO_URL);
+    setIsVideoUrlDraftEdited(false);
     setOpeningVideoInputUrl(url.trim());
     showAlert('Tautan video opening berhasil disimpan!');
   };
@@ -313,6 +681,8 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
         openingVideoUrl: dataUrl,
         openingVideoTitle: file.name,
       });
+      clearFormDraft(DRAFT_KEYS.ADMIN_VIDEO_URL);
+      setIsVideoUrlDraftEdited(false);
       setOpeningVideoInputUrl(dataUrl);
       setIsUploadingVideo(false);
       showAlert(`Video opening "${file.name}" berhasil diunggah dan disimpan!`);
@@ -329,6 +699,8 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
       openingVideoUrl: '',
       openingVideoTitle: '',
     });
+    clearFormDraft(DRAFT_KEYS.ADMIN_VIDEO_URL);
+    setIsVideoUrlDraftEdited(false);
     setOpeningVideoInputUrl('');
     showAlert('Video opening dikembalikan ke animasi default Motion Graphic Siaran TV.');
   };
@@ -420,6 +792,18 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
           >
             <ShieldCheck className="w-3.5 h-3.5 text-indigo-600" />
             <span>Akun & Keamanan</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => setActiveTab('blogger')}
+            className={`hidden px-3.5 py-2 text-xs font-semibold rounded-xl transition-all cursor-pointer items-center gap-1.5 ${
+              activeTab === 'blogger'
+                ? 'glass-button bg-white text-[#FF5722] shadow-sm font-bold border-white'
+                : 'text-slate-600 hover:text-slate-950 hover:bg-white/40'
+            }`}
+          >
+            <BloggerIcon size={14} className={activeTab === 'blogger' ? 'text-[#FF5722]' : 'text-orange-500'} />
+            <span>Embed & Share Blogger</span>
           </button>
         </div>
       </div>
@@ -525,7 +909,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                 Manajemen Periode Pemilihan (Multi-Period Reusable Engine)
               </h2>
               <p className="text-xs text-slate-500 mt-0.5">
-                Sistem dirancang dapat digunakan kembali setiap tahun ajaran baru tanpa perlu membuat database terpisah.
+                Setiap periode tersimpan otomatis secara permanen & tidak akan hilang kecuali dihapus. Data DPT & PIN serta Pasangan Calon di setiap periode tetap terjaga utuh.
               </p>
             </div>
             <div className="flex items-center gap-2">
@@ -537,7 +921,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                 <span>Unduh Berita Acara (BAHP)</span>
               </button>
               <button
-                onClick={() => setShowNewPeriodModal(true)}
+                onClick={handleOpenNewPeriodModal}
                 className="px-4 py-2.5 rounded-xl bg-slate-900 hover:bg-slate-800 text-white text-xs font-bold flex items-center gap-1.5 transition-all shadow-sm cursor-pointer"
               >
                 <Plus className="w-4 h-4" />
@@ -546,18 +930,30 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
             </div>
           </div>
 
+          <div className="p-3.5 rounded-2xl bg-emerald-50/80 border border-emerald-200/80 text-emerald-900 text-xs flex items-start gap-2.5">
+            <ShieldCheck className="w-4 h-4 text-emerald-600 shrink-0 mt-0.5" />
+            <p className="leading-relaxed">
+              <strong>Penyimpanan Otomatis & Isolasi Data Aman:</strong> Membuat, mengubah, atau mengaktifkan periode baru tidak akan mengubah maupun menghapus daftar <strong>DPT & PIN</strong>, <strong>Pasangan Calon</strong>, <strong>SK Panitia</strong>, maupun <strong>Suara</strong> pada periode lainnya.
+            </p>
+          </div>
+
           <div className="grid grid-cols-1 gap-4">
-            {periods.map((p) => {
+            {periods.length === 0 ? (
+              <div className="rounded-3xl glass-panel p-8 text-center text-xs text-slate-500">
+                Belum ada periode pemilihan terdaftar. Klik &ldquo;Buat Periode Baru&rdquo; untuk memulai.
+              </div>
+            ) : periods.map((p) => {
               const isActive = p.status === 'active';
+              const stats = electionStore.getPeriodStats(p.id);
               return (
                 <div
                   key={p.id}
-                  className={`rounded-3xl glass-card glass-card-hover p-6 shadow-md flex flex-col md:flex-row md:items-center justify-between gap-4 transition-all relative overflow-hidden ${
+                  className={`rounded-3xl glass-card glass-card-hover p-6 shadow-md flex flex-col lg:flex-row lg:items-center justify-between gap-4 transition-all relative overflow-hidden ${
                     isActive ? 'border-sky-400 bg-sky-50/50 ring-2 ring-sky-400/30' : 'border-white/80'
                   }`}
                 >
-                  <div className="space-y-2">
-                    <div className="flex items-center gap-2">
+                  <div className="space-y-2.5">
+                    <div className="flex flex-wrap items-center gap-2">
                       <span className="text-xs font-mono font-bold text-slate-500 bg-white/60 px-2 py-0.5 rounded-lg border border-white/80">
                         TA {p.academicYear}
                       </span>
@@ -577,11 +973,40 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                           DRAFT (PERSIAPAN)
                         </span>
                       )}
+                      <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-sky-50 text-sky-700 border border-sky-200">
+                        <CheckCircle2 className="w-3 h-3 text-sky-600" />
+                        Tersimpan Permanen
+                      </span>
                     </div>
                     <h3 className="text-base font-black text-slate-900 tracking-tight">{p.periodName}</h3>
                     <p className="text-xs text-slate-600 max-w-xl leading-relaxed">
                       {p.description || `Jadwal pemungutan suara: ${p.startDate} (${p.votingOpenTime} - ${p.votingCloseTime} WIB)`}
                     </p>
+
+                    {/* Per-period preserved data summary counters */}
+                    <div className="flex flex-wrap items-center gap-2 pt-0.5">
+                      <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-white/80 border border-slate-200 text-[11px] font-bold text-slate-700">
+                        <Users className="w-3.5 h-3.5 text-sky-600" />
+                        <span>DPT &amp; PIN: {stats.votersCount} Siswa</span>
+                      </span>
+                      <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-white/80 border border-slate-200 text-[11px] font-bold text-slate-700">
+                        <Award className="w-3.5 h-3.5 text-indigo-600" />
+                        <span>Pasangan Calon: {stats.candidatesCount} Paslon</span>
+                      </span>
+                      <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-white/80 border border-slate-200 text-[11px] font-bold text-slate-700">
+                        <Vote className="w-3.5 h-3.5 text-emerald-600" />
+                        <span>Suara Masuk: {stats.votesCount} ({stats.participationPercentage}%)</span>
+                      </span>
+                      <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-white/80 border border-slate-200 text-[11px] font-bold text-slate-700">
+                        <Clock className="w-3.5 h-3.5 text-amber-600" />
+                        <span>Belum Memilih: {stats.unvotedCount}</span>
+                      </span>
+                      <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-white/80 border border-slate-200 text-[11px] font-bold text-slate-700">
+                        <FileCheck className="w-3.5 h-3.5 text-purple-600" />
+                        <span>Panitia SK: {stats.committeeCount}</span>
+                      </span>
+                    </div>
+
                     <div className="flex flex-wrap items-center gap-2 pt-1">
                       <span className="text-[11px] font-semibold text-slate-600">Jam Buka - Tutup Pemilihan:</span>
                       <input
@@ -609,7 +1034,16 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                     </div>
                   </div>
 
-                  <div className="flex items-center gap-2 shrink-0">
+                  <div className="flex flex-wrap items-center gap-2 shrink-0">
+                    <button
+                      type="button"
+                      onClick={() => setEditingPeriod(p)}
+                      className="px-3 py-2.5 rounded-xl bg-white/90 hover:bg-white border border-slate-200 text-slate-700 text-xs font-semibold flex items-center gap-1.5 transition-all cursor-pointer shadow-2xs"
+                      title="Edit informasi periode ini tanpa mengubah data DPT & Paslon"
+                    >
+                      <Edit className="w-3.5 h-3.5" />
+                      <span>Edit</span>
+                    </button>
                     <button
                       type="button"
                       onClick={() => handleOpenBahpModal(p.id)}
@@ -637,6 +1071,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                       onClick={() => setConfirmDeletePeriod(p)}
                       className="px-3.5 py-2.5 rounded-xl bg-rose-50/80 hover:bg-rose-100 border border-rose-200 text-rose-700 text-xs font-semibold flex items-center gap-1.5 transition-all cursor-pointer"
                       title="Hapus set periode pemilihan ini"
+                      aria-label={`Hapus periode ${p.periodName}`}
                     >
                       <Trash2 className="w-3.5 h-3.5" />
                       <span>Hapus</span>
@@ -652,7 +1087,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
       {/* TAB 2: SCHOOL IDENTITY SETUP */}
       {activeTab === 'school' && (
         <div className="max-w-2xl glass-panel rounded-3xl p-6 md:p-8 shadow-lg space-y-6">
-          <div className="flex items-center justify-between">
+          <div className="flex flex-wrap items-center justify-between gap-3">
             <div>
               <h2 className="text-base font-black text-slate-900 tracking-tight">
                 Konfigurasi Satuan Pendidikan (Sekolah / Madrasah)
@@ -662,8 +1097,10 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
               </p>
             </div>
             {isSchoolFormEdited && (
-              <span className="px-3 py-1 rounded-full text-[11px] font-bold bg-amber-100 text-amber-900 border border-amber-300 animate-pulse">
-                ✏️ Ada Perubahan Belum Disimpan
+              <span className="shrink-0 whitespace-nowrap px-3 py-1 rounded-full text-[11px] font-bold bg-amber-100 text-amber-900 border border-amber-300">
+                {schoolDraftRestoredAt
+                  ? `✏️ Draf Dipulihkan (${formatDraftTimestamp(schoolDraftRestoredAt)})`
+                  : '✏️ Draf Tersimpan Otomatis (Belum Disimpan)'}
               </span>
             )}
           </div>
@@ -839,11 +1276,32 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                       )}
                     </div>
                     <div className="flex-1 space-y-1">
-                      <label className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-800 text-xs font-semibold cursor-pointer transition-colors shadow-2xs">
-                        <Upload className="w-3.5 h-3.5" />
-                        <span>Pilih File Logo</span>
-                        <input type="file" accept="image/*,.png,.jpg,.jpeg,.gif,.svg,.webp,.bmp,.ico,.tiff,.avif,.heic,.heif" onChange={handleUploadSchoolLogo} className="hidden" />
-                      </label>
+                      <div className="flex items-center gap-1.5">
+                        <label className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-800 text-xs font-semibold cursor-pointer transition-colors shadow-2xs">
+                          <Upload className="w-3.5 h-3.5" />
+                          <span>Pilih File Logo</span>
+                          <input type="file" accept="image/*,.png,.jpg,.jpeg,.gif,.svg,.webp,.bmp,.ico,.tiff,.avif,.heic,.heif" onChange={handleUploadSchoolLogo} className="hidden" />
+                        </label>
+                        {schoolForm.logoUrl && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setSchoolForm((prev) => {
+                                const next = { ...prev, logoUrl: '' };
+                                if (isSchoolFormEdited) saveFormDraft<SchoolConfig>(DRAFT_KEYS.ADMIN_SCHOOL_FORM, next);
+                                return next;
+                              });
+                              electionStore.updateSchool({ logoUrl: '' });
+                              showAlert('Logo kustom sekolah telah dihapus.');
+                            }}
+                            className="p-1.5 text-rose-600 hover:bg-rose-50 rounded-lg transition-colors cursor-pointer"
+                            title="Hapus logo sekolah kustom"
+                            aria-label="Hapus logo sekolah kustom"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
+                        )}
+                      </div>
                       <p className="text-[10px] text-slate-400">Semua format gambar didukung (PNG, JPG, SVG, WEBP, HEIC, dll)</p>
                     </div>
                   </div>
@@ -899,7 +1357,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                   onClick={handleCancelSchoolEdits}
                   className="px-4 py-2.5 rounded-xl border border-slate-300 bg-white hover:bg-slate-100 text-slate-700 text-xs font-bold transition-all cursor-pointer"
                 >
-                  Batal
+                  Buang Draf
                 </button>
               )}
               <button
@@ -923,10 +1381,22 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                 Kepanitiaan Pemilihan Berdasarkan Surat Keputusan (SK)
               </h2>
               <p className="text-xs text-slate-500 mt-0.5">
-                Pengesahan penanggung jawab bilik suara, saksi, dan pengawas pemilihan
+                Pengesahan penanggung jawab bilik suara, saksi, dan pengawas pemilihan per periode
               </p>
             </div>
             <div className="flex flex-wrap items-center gap-2">
+              <select
+                aria-label="Pilih Periode SK Panitia"
+                value={activeCommitteePeriod.id}
+                onChange={(e) => setSelectedCommitteePeriodId(e.target.value)}
+                className="px-3 py-2 text-xs font-semibold rounded-xl glass-input text-slate-900 focus:outline-none cursor-pointer"
+              >
+                {periods.map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.periodName} ({p.academicYear}) — {p.status === 'active' ? 'AKTIF' : p.status === 'draft' ? 'DRAFT' : 'SELESAI'}
+                  </option>
+                ))}
+              </select>
               <button
                 type="button"
                 onClick={() => setShowSkModal(true)}
@@ -934,7 +1404,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                 title="Buka, Edit Isi & Cetak Surat Bukti Fisik SK Panitia Resmi (1-99 Halaman)"
               >
                 <FileText className="w-4 h-4" />
-                <span>Surat Bukti Fisik & Edit SK (1-99 Hal)</span>
+                <span>Surat Bukti Fisik &amp; Edit SK (1-99 Hal)</span>
               </button>
               <button
                 onClick={() => setShowAddCommitteeModal(true)}
@@ -946,22 +1416,46 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
             </div>
           </div>
 
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
-            {committee.map((c) => (
-              <div key={c.id} className="rounded-3xl glass-card glass-card-hover p-5 shadow-sm space-y-3 relative overflow-hidden">
-                <span className="text-[10px] font-bold uppercase tracking-wider text-purple-700 bg-purple-100/80 border border-purple-200 px-3 py-1 rounded-full">
-                  {c.role}
-                </span>
-                <div>
-                  <h3 className="text-sm font-bold text-slate-900">{c.memberName}</h3>
-                  <p className="text-xs text-slate-500">{c.className || 'Dewan Pembina'}</p>
+          {displayedCommittee.length === 0 ? (
+            <div className="rounded-3xl glass-panel p-8 text-center border border-white/80 space-y-2">
+              <p className="text-sm font-bold text-slate-800">
+                Belum ada anggota panitia SK untuk periode {activeCommitteePeriod.periodName}
+              </p>
+              <p className="text-xs text-slate-500">
+                Klik tombol &ldquo;Tambah Anggota Panitia&rdquo; atau buka editor SK Panitia untuk menambahkan susunan panitia.
+              </p>
+            </div>
+          ) : (
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+              {displayedCommittee.map((c) => (
+                <div key={c.id} className="rounded-3xl glass-card glass-card-hover p-5 shadow-sm space-y-3 relative overflow-hidden flex flex-col justify-between">
+                  <div className="space-y-3">
+                    <div className="flex items-start justify-between gap-2">
+                      <span className="text-[10px] font-bold uppercase tracking-wider text-purple-700 bg-purple-100/80 border border-purple-200 px-3 py-1 rounded-full">
+                        {c.role}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => handleDeleteCommitteeMember(c)}
+                        className="p-1.5 rounded-lg text-rose-500 hover:bg-rose-50 hover:text-rose-700 transition-colors cursor-pointer shrink-0"
+                        title={`Hapus ${c.memberName} dari SK Panitia`}
+                        aria-label={`Hapus anggota panitia ${c.memberName}`}
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+                    <div>
+                      <h3 className="text-sm font-bold text-slate-900">{c.memberName}</h3>
+                      <p className="text-xs text-slate-500">{c.className || 'Dewan Pembina'}</p>
+                    </div>
+                  </div>
+                  <div className="text-[11px] text-slate-400 pt-2 border-t border-slate-200/60 font-mono">
+                    <span>SK No: {c.skNumber}</span>
+                  </div>
                 </div>
-                <div className="text-[11px] text-slate-400 pt-2 border-t border-slate-200/60 font-mono">
-                  <span>SK No: {c.skNumber}</span>
-                </div>
-              </div>
-            ))}
-          </div>
+              ))}
+            </div>
+          )}
         </div>
       )}
 
@@ -1001,7 +1495,13 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-200/50 text-slate-700">
-                  {auditLogs.map((log) => (
+                  {auditLogs.length === 0 ? (
+                    <tr>
+                      <td colSpan={6} className="p-8 text-center font-sans text-xs text-slate-400">
+                        Belum ada catatan aktivitas sistem yang tercatat.
+                      </td>
+                    </tr>
+                  ) : auditLogs.map((log) => (
                     <tr key={log.id} className="hover:bg-white/80 transition-colors">
                       <td className="p-3 text-slate-500 whitespace-nowrap">
                         {new Date(log.timestamp).toLocaleTimeString('id-ID')}
@@ -1036,9 +1536,10 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
       {activeTab === 'video' && (() => {
         const activePeriod = periods.find((p) => p.status === 'active') || periods[0];
         const candidates = electionStore.getCandidates(activePeriod?.id || '');
+        const isVideoEnabled = school.openingVideoEnabled !== false;
         const ytEmbed = school.openingVideoUrl ? (() => {
-          const m = school.openingVideoUrl.match(/^.*(youtu.be\/|v\/|u\/\w\/|embed\/|watch\?v=|\&v=)([^#\&\?]*).*/);
-          return (m && m[2].length === 11) ? `https://www.youtube.com/embed/${m[2]}` : null;
+          const m = school.openingVideoUrl.match(/^.*(?:youtu\.be\/|youtube\.com\/(?:embed\/|shorts\/|live\/|v\/|watch\?v=|watch\?.+&v=))([a-zA-Z0-9_-]{11}).*/);
+          return (m && m[1]) ? `https://www.youtube.com/embed/${m[1]}` : null;
         })() : null;
 
         return (
@@ -1059,15 +1560,38 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                   </p>
                 </div>
 
-                {/* Instant Play Test Button */}
-                <button
-                  type="button"
-                  onClick={() => setShowOpeningPreview(true)}
-                  className="px-5 py-2.5 rounded-xl bg-gradient-to-r from-rose-600 to-amber-600 hover:from-rose-500 hover:to-amber-500 text-white font-extrabold text-xs shadow-md shadow-rose-600/20 flex items-center gap-2 cursor-pointer transition-all transform hover:scale-102 active:scale-98 shrink-0"
-                >
-                  <Play className="w-4 h-4 fill-white" />
-                  <span>Uji Putar Video Sekarang</span>
-                </button>
+                {/* Activation Toggle & Instant Play Test Button */}
+                <div className="flex flex-wrap items-center gap-2.5 shrink-0">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const next = !isVideoEnabled;
+                      electionStore.updateSchool({ openingVideoEnabled: next });
+                      showAlert(
+                        next
+                          ? 'Video Opening AKTIF dan akan otomatis diputar saat aplikasi dibuka.'
+                          : 'Putar otomatis Video Opening dinonaktifkan (tetap dapat diputar manual via tombol Opening).'
+                      );
+                    }}
+                    className={`px-4 py-2.5 rounded-xl font-bold text-xs border transition-all cursor-pointer flex items-center gap-2 ${
+                      isVideoEnabled
+                        ? 'bg-emerald-50 border-emerald-300 text-emerald-800 hover:bg-emerald-100'
+                        : 'bg-slate-100 border-slate-300 text-slate-700 hover:bg-slate-200'
+                    }`}
+                  >
+                    <span className={`w-2.5 h-2.5 rounded-full ${isVideoEnabled ? 'bg-emerald-500 animate-pulse' : 'bg-slate-400'}`} />
+                    <span>{isVideoEnabled ? 'Autoplay Opening: AKTIF' : 'Autoplay Opening: NONAKTIF'}</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => setShowOpeningPreview(true)}
+                    className="px-5 py-2.5 rounded-xl bg-gradient-to-r from-rose-600 to-amber-600 hover:from-rose-500 hover:to-amber-500 text-white font-extrabold text-xs shadow-md shadow-rose-600/20 flex items-center gap-2 cursor-pointer transition-all transform hover:scale-102 active:scale-98"
+                  >
+                    <Play className="w-4 h-4 fill-white" />
+                    <span>Uji Putar Video Sekarang</span>
+                  </button>
+                </div>
               </div>
 
               {/* Status Banner */}
@@ -1090,9 +1614,10 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                   <button
                     type="button"
                     onClick={handleResetOpeningVideo}
-                    className="text-xs text-slate-500 hover:text-rose-600 underline font-semibold cursor-pointer"
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-rose-50 hover:bg-rose-100 border border-rose-200 text-xs text-rose-700 font-bold cursor-pointer transition-colors"
                   >
-                    Kembalikan ke Animasi Bawaan
+                    <Trash2 className="w-3.5 h-3.5" />
+                    <span>Hapus Video Khusus</span>
                   </button>
                 )}
               </div>
@@ -1154,7 +1679,10 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                       <input
                         type="url"
                         value={openingVideoInputUrl}
-                        onChange={(e) => setOpeningVideoInputUrl(e.target.value)}
+                        onChange={(e) => {
+                          setIsVideoUrlDraftEdited(true);
+                          setOpeningVideoInputUrl(e.target.value);
+                        }}
                         placeholder="https://www.youtube.com/watch?v=... atau link MP4"
                         className="flex-1 px-3.5 py-2 text-xs rounded-xl glass-input text-slate-900 focus:outline-none"
                       />
@@ -1596,12 +2124,42 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
       {/* MODAL: CREATE NEW PERIOD */}
       {showNewPeriodModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/60 backdrop-blur-md">
-          <div className="w-full max-w-lg glass-panel rounded-3xl shadow-2xl border-white/80 p-6 space-y-4 animate-in fade-in">
-            <div className="flex items-center justify-between border-b border-slate-200/60 pb-3">
-              <h3 className="text-sm font-black text-slate-900 tracking-tight">Buat Periode Pemilihan Baru</h3>
-              <button onClick={() => setShowNewPeriodModal(false)} className="text-slate-400 hover:text-slate-700 cursor-pointer">
-                <X className="w-4 h-4" />
-              </button>
+          <div className="w-full max-w-lg glass-panel rounded-3xl shadow-2xl border-white/80 p-6 space-y-4 max-h-[90vh] overflow-y-auto animate-in fade-in">
+            <div className="flex items-center justify-between border-b border-slate-200/60 pb-3 gap-2">
+              <div className="flex items-center gap-2 flex-wrap">
+                <h3 className="text-sm font-black text-slate-900 tracking-tight">Buat Periode Pemilihan Baru</h3>
+                <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-50 text-emerald-700 border border-emerald-200">
+                  {newPeriodDraftRestoredAt
+                    ? `Draf dipulihkan (${formatDraftTimestamp(newPeriodDraftRestoredAt)})`
+                    : 'Auto-Save Draf'}
+                </span>
+              </div>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={handleResetNewPeriodFormOnly}
+                  className="text-[11px] font-semibold text-slate-500 hover:text-rose-600 cursor-pointer px-2 py-1 rounded-lg hover:bg-rose-50 transition-colors"
+                >
+                  Reset Form
+                </button>
+                <button
+                  type="button"
+                  aria-label="Tutup modal buat periode baru"
+                  onClick={() => {
+                    saveFormDraft<NewPeriodDraftState>(DRAFT_KEYS.ADMIN_NEW_PERIOD, {
+                      isOpen: false,
+                      newPeriod,
+                      copyFromExisting,
+                      copySourcePeriodId,
+                      copyOptions,
+                    });
+                    setShowNewPeriodModal(false);
+                  }}
+                  className="text-slate-400 hover:text-slate-700 cursor-pointer"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
             </div>
 
             <form onSubmit={handleCreatePeriod} className="space-y-3">
@@ -1630,26 +2188,36 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                   />
                 </div>
                 <div>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">Tanggal Pemilihan</label>
+                  <input
+                    type="date"
+                    value={newPeriod.startDate}
+                    onChange={(e) => setNewPeriod({ ...newPeriod, startDate: e.target.value, endDate: e.target.value })}
+                    className="w-full px-3.5 py-2 text-xs rounded-xl glass-input text-slate-900 focus:outline-none"
+                    required
+                  />
+                </div>
+              </div>
+
+              <div className="grid grid-cols-3 gap-3">
+                <div>
                   <label className="block text-xs font-semibold text-slate-700 mb-1">Status Awal</label>
                   <select
                     value={newPeriod.status}
                     onChange={(e) => setNewPeriod({ ...newPeriod, status: e.target.value as any })}
-                    className="w-full px-3.5 py-2 text-xs rounded-xl glass-input text-slate-800 focus:outline-none"
+                    className="w-full px-3 py-2 text-xs rounded-xl glass-input text-slate-800 focus:outline-none"
                   >
                     <option value="draft">Draft (Persiapan)</option>
                     <option value="active">Langsung Aktif</option>
                   </select>
                 </div>
-              </div>
-
-              <div className="grid grid-cols-2 gap-3">
                 <div>
                   <label className="block text-xs font-semibold text-slate-700 mb-1">Waktu Buka Bilik</label>
                   <input
                     type="time"
                     value={newPeriod.votingOpenTime}
                     onChange={(e) => setNewPeriod({ ...newPeriod, votingOpenTime: e.target.value })}
-                    className="w-full px-3.5 py-2 text-xs rounded-xl glass-input text-slate-900 focus:outline-none"
+                    className="w-full px-3 py-2 text-xs rounded-xl glass-input text-slate-900 focus:outline-none"
                     required
                   />
                 </div>
@@ -1659,16 +2227,142 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                     type="time"
                     value={newPeriod.votingCloseTime}
                     onChange={(e) => setNewPeriod({ ...newPeriod, votingCloseTime: e.target.value })}
-                    className="w-full px-3.5 py-2 text-xs rounded-xl glass-input text-slate-900 focus:outline-none"
+                    className="w-full px-3 py-2 text-xs rounded-xl glass-input text-slate-900 focus:outline-none"
                     required
                   />
                 </div>
               </div>
 
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 mb-1">Keterangan (Opsional)</label>
+                <input
+                  type="text"
+                  value={newPeriod.description}
+                  onChange={(e) => setNewPeriod({ ...newPeriod, description: e.target.value })}
+                  placeholder="Contoh: Pemilihan Ketua & Wakil Ketua OSIS Periode Baru"
+                  className="w-full px-3.5 py-2 text-xs rounded-xl glass-input text-slate-900 focus:outline-none"
+                />
+              </div>
+
+              {/* Optional non-destructive data copy */}
+              <div className="p-3.5 rounded-2xl bg-sky-50/80 border border-sky-200/80 space-y-2.5">
+                <label className="flex items-start gap-2 cursor-pointer text-xs text-slate-800 font-semibold">
+                  <input
+                    type="checkbox"
+                    checked={copyFromExisting}
+                    onChange={(e) => setCopyFromExisting(e.target.checked)}
+                    className="mt-0.5 rounded border-slate-300 text-sky-600 focus:ring-sky-500"
+                  />
+                  <span>
+                    Bawa/Salin data dari periode yang ada ke periode baru ini (data periode asal tetap permanen &amp; tidak hilang)
+                  </span>
+                </label>
+
+                {copyFromExisting && (() => {
+                  const srcStats = copySourcePeriodId ? electionStore.getPeriodStats(copySourcePeriodId) : null;
+                  const copiedVotersPreview = copyOptions.copyVoters && srcStats ? srcStats.votersCount : 0;
+                  const copiedCandsPreview = copyOptions.copyCandidates && srcStats ? srcStats.candidatesCount : 0;
+                  const copiedCommPreview = copyOptions.copyCommittee && srcStats ? srcStats.committeeCount : 0;
+                  const copiedVotesPreview =
+                    copyOptions.copyVotes && copyOptions.copyVoters && copyOptions.copyCandidates && srcStats
+                      ? srcStats.votesCount
+                      : 0;
+                  const copiedUnvotedPreview = Math.max(0, copiedVotersPreview - copiedVotesPreview);
+                  return (
+                    <div className="pl-5 space-y-2.5 pt-1.5 border-t border-sky-200/70">
+                      <div>
+                        <label className="block text-[11px] font-semibold text-slate-600 mb-1">Ambil salinan dari periode:</label>
+                        <select
+                          value={copySourcePeriodId}
+                          onChange={(e) => setCopySourcePeriodId(e.target.value)}
+                          className="w-full px-3 py-1.5 text-xs rounded-xl bg-white border border-sky-200 text-slate-800"
+                        >
+                          {periods.map((p) => {
+                            const s = electionStore.getPeriodStats(p.id);
+                            return (
+                              <option key={p.id} value={p.id}>
+                                {p.periodName} ({s.votersCount} DPT, {s.candidatesCount} Paslon, {s.votesCount} Suara, {s.committeeCount} Panitia SK)
+                              </option>
+                            );
+                          })}
+                        </select>
+                      </div>
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-[11px] text-slate-700">
+                        <label className="inline-flex items-center gap-1.5 cursor-pointer">
+                          <input
+                            type="checkbox"
+                            checked={copyOptions.copyVoters}
+                            onChange={(e) =>
+                              setCopyOptions({
+                                ...copyOptions,
+                                copyVoters: e.target.checked,
+                                copyVotes: e.target.checked ? copyOptions.copyVotes : false,
+                              })
+                            }
+                          />
+                          <span>Salin DPT &amp; PIN Siswa</span>
+                        </label>
+                        <label className="inline-flex items-center gap-1.5 cursor-pointer">
+                          <input
+                            type="checkbox"
+                            checked={copyOptions.copyCandidates}
+                            onChange={(e) =>
+                              setCopyOptions({
+                                ...copyOptions,
+                                copyCandidates: e.target.checked,
+                                copyVotes: e.target.checked ? copyOptions.copyVotes : false,
+                              })
+                            }
+                          />
+                          <span>Salin Pasangan Calon</span>
+                        </label>
+                        <label className="inline-flex items-center gap-1.5 cursor-pointer">
+                          <input
+                            type="checkbox"
+                            checked={copyOptions.copyCommittee}
+                            onChange={(e) => setCopyOptions({ ...copyOptions, copyCommittee: e.target.checked })}
+                          />
+                          <span>Salin Panitia SK</span>
+                        </label>
+                        <label
+                          className={`inline-flex items-center gap-1.5 ${
+                            copyOptions.copyVoters && copyOptions.copyCandidates
+                              ? 'cursor-pointer text-slate-700'
+                              : 'cursor-not-allowed text-slate-400'
+                          }`}
+                        >
+                          <input
+                            type="checkbox"
+                            disabled={!copyOptions.copyVoters || !copyOptions.copyCandidates}
+                            checked={copyOptions.copyVotes && copyOptions.copyVoters && copyOptions.copyCandidates}
+                            onChange={(e) => setCopyOptions({ ...copyOptions, copyVotes: e.target.checked })}
+                          />
+                          <span>Salin Suara Masuk &amp; Belum Memilih</span>
+                        </label>
+                      </div>
+                      {srcStats && (
+                        <div className="p-2.5 rounded-xl bg-white/90 border border-sky-200/80 text-[10px] text-slate-700 space-y-1">
+                          <div className="font-bold text-slate-800">
+                            Ringkasan Data Periode Baru Ini:
+                          </div>
+                          <div>
+                            DPT &amp; PIN: <strong>{copiedVotersPreview} Siswa</strong> · Pasangan Calon: <strong>{copiedCandsPreview}</strong> · Suara Masuk: <strong>{copiedVotesPreview}</strong> · Belum Memilih: <strong>{copiedUnvotedPreview}</strong> · Panitia SK: <strong>{copiedCommPreview}</strong>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })()}
+
+                <p className="text-[11px] text-sky-800 leading-relaxed">
+                  Seluruh data periode (DPT &amp; PIN, Pasangan Calon, Suara Masuk, Belum Memilih, dan Panitia SK) tersimpan permanen di server &amp; perangkat, tidak akan hilang kecuali periode dihapus manual oleh Admin.
+                </p>
+              </div>
+
               <div className="pt-3 flex items-center justify-end gap-2 border-t border-slate-200/60">
                 <button
                   type="button"
-                  onClick={() => setShowNewPeriodModal(false)}
+                  onClick={handleDiscardNewPeriodDraft}
                   className="px-3.5 py-1.5 rounded-xl glass-button text-xs text-slate-700 hover:text-slate-900 cursor-pointer"
                 >
                   Batal
@@ -1685,13 +2379,150 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
         </div>
       )}
 
+      {/* MODAL: EDIT EXISTING PERIOD */}
+      {editingPeriod && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/60 backdrop-blur-md">
+          <div className="w-full max-w-lg glass-panel rounded-3xl shadow-2xl border-white/80 p-6 space-y-4 animate-in fade-in">
+            <div className="flex items-center justify-between border-b border-slate-200/60 pb-3 gap-2">
+              <div className="flex items-center gap-2">
+                <h3 className="text-sm font-black text-slate-900 tracking-tight">Edit Data Periode Pemilihan</h3>
+                <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-50 text-emerald-700 border border-emerald-200">
+                  Auto-Save Draf
+                </span>
+              </div>
+              <button
+                type="button"
+                aria-label="Tutup modal edit periode"
+                onClick={() => {
+                  clearFormDraft(DRAFT_KEYS.ADMIN_EDIT_PERIOD);
+                  setEditingPeriod(null);
+                }}
+                className="text-slate-400 hover:text-slate-700 cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <form onSubmit={handleSaveEditPeriod} className="space-y-3">
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 mb-1">Nama Periode</label>
+                <input
+                  type="text"
+                  value={editingPeriod.periodName}
+                  onChange={(e) => setEditingPeriod({ ...editingPeriod, periodName: e.target.value })}
+                  className="w-full px-3.5 py-2 text-xs rounded-xl glass-input text-slate-900 focus:outline-none"
+                  required
+                />
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">Tahun Ajaran</label>
+                  <input
+                    type="text"
+                    value={editingPeriod.academicYear}
+                    onChange={(e) => setEditingPeriod({ ...editingPeriod, academicYear: e.target.value })}
+                    className="w-full px-3.5 py-2 text-xs rounded-xl glass-input text-slate-900 focus:outline-none"
+                    required
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">Tanggal Pemilihan</label>
+                  <input
+                    type="date"
+                    value={editingPeriod.startDate}
+                    onChange={(e) => setEditingPeriod({ ...editingPeriod, startDate: e.target.value, endDate: e.target.value })}
+                    className="w-full px-3.5 py-2 text-xs rounded-xl glass-input text-slate-900 focus:outline-none"
+                    required
+                  />
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">Waktu Buka Bilik</label>
+                  <input
+                    type="time"
+                    value={editingPeriod.votingOpenTime}
+                    onChange={(e) => setEditingPeriod({ ...editingPeriod, votingOpenTime: e.target.value })}
+                    className="w-full px-3.5 py-2 text-xs rounded-xl glass-input text-slate-900 focus:outline-none"
+                    required
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">Waktu Tutup Bilik</label>
+                  <input
+                    type="time"
+                    value={editingPeriod.votingCloseTime}
+                    onChange={(e) => setEditingPeriod({ ...editingPeriod, votingCloseTime: e.target.value })}
+                    className="w-full px-3.5 py-2 text-xs rounded-xl glass-input text-slate-900 focus:outline-none"
+                    required
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 mb-1">Keterangan</label>
+                <input
+                  type="text"
+                  value={editingPeriod.description || ''}
+                  onChange={(e) => setEditingPeriod({ ...editingPeriod, description: e.target.value })}
+                  className="w-full px-3.5 py-2 text-xs rounded-xl glass-input text-slate-900 focus:outline-none"
+                />
+              </div>
+
+              <div className="p-3 rounded-xl bg-emerald-50/80 border border-emerald-200 text-[11px] text-emerald-900">
+                Perubahan nama atau jadwal periode tidak mengubah Daftar DPT & PIN, Pasangan Calon, maupun suara yang tersimpan di periode ini.
+              </div>
+
+              <div className="pt-3 flex items-center justify-end gap-2 border-t border-slate-200/60">
+                <button
+                  type="button"
+                  onClick={() => {
+                    clearFormDraft(DRAFT_KEYS.ADMIN_EDIT_PERIOD);
+                    setEditingPeriod(null);
+                  }}
+                  className="px-3.5 py-1.5 rounded-xl glass-button text-xs text-slate-700 hover:text-slate-900 cursor-pointer"
+                >
+                  Batal
+                </button>
+                <button
+                  type="submit"
+                  className="px-4 py-2 rounded-xl bg-slate-900 text-white text-xs font-bold hover:bg-slate-800 shadow-sm cursor-pointer transition-colors"
+                >
+                  Simpan Perubahan Periode
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
       {/* MODAL: ADD COMMITTEE MEMBER */}
       {showAddCommitteeModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/60 backdrop-blur-md">
           <div className="w-full max-w-md glass-panel rounded-3xl shadow-2xl border-white/80 p-6 space-y-4 animate-in fade-in">
-            <div className="flex items-center justify-between border-b border-slate-200/60 pb-3">
-              <h3 className="text-sm font-black text-slate-900 tracking-tight">Tambah Panitia Ber-SK</h3>
-              <button onClick={() => setShowAddCommitteeModal(false)} className="text-slate-400 hover:text-slate-700 cursor-pointer">
+            <div className="flex items-center justify-between border-b border-slate-200/60 pb-3 gap-2">
+              <div className="flex items-center gap-2 flex-wrap">
+                <h3 className="text-sm font-black text-slate-900 tracking-tight">Tambah Panitia Ber-SK</h3>
+                <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-50 text-emerald-700 border border-emerald-200">
+                  {committeeDraftRestoredAt
+                    ? `Draf dipulihkan (${formatDraftTimestamp(committeeDraftRestoredAt)})`
+                    : 'Auto-Save Draf'}
+                </span>
+              </div>
+              <button
+                type="button"
+                aria-label="Tutup modal tambah panitia"
+                onClick={() => {
+                  saveFormDraft<NewCommitteeDraftState>(DRAFT_KEYS.ADMIN_NEW_COMMITTEE, {
+                    isOpen: false,
+                    form: newMember,
+                  });
+                  setShowAddCommitteeModal(false);
+                }}
+                className="text-slate-400 hover:text-slate-700 cursor-pointer"
+              >
                 <X className="w-4 h-4" />
               </button>
             </div>
@@ -1739,7 +2570,12 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
               <div className="pt-3 flex items-center justify-end gap-2 border-t border-slate-200/60">
                 <button
                   type="button"
-                  onClick={() => setShowAddCommitteeModal(false)}
+                  onClick={() => {
+                    clearFormDraft(DRAFT_KEYS.ADMIN_NEW_COMMITTEE);
+                    setCommitteeDraftRestoredAt(null);
+                    setNewMember(createDefaultCommitteeMember());
+                    setShowAddCommitteeModal(false);
+                  }}
                   className="px-3.5 py-1.5 rounded-xl glass-button text-xs text-slate-700 hover:text-slate-900 cursor-pointer"
                 >
                   Batal
@@ -1761,7 +2597,8 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
         <PrintBeritaAcara
           school={school}
           summary={selectedBahpPeriodId ? electionStore.getSummary(selectedBahpPeriodId) : summary}
-          committee={committee}
+          committee={selectedBahpPeriodId ? electionStore.getCommittee(selectedBahpPeriodId) : committee}
+          appTimeMs={appTimeMs}
           onClose={() => setShowBahpModal(false)}
         />
       )}
@@ -1770,8 +2607,8 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
       {showSkModal && (
         <PrintSkPanitia
           school={school}
-          period={summary.period}
-          committee={committee}
+          period={activeCommitteePeriod}
+          committee={displayedCommittee}
           onClose={() => setShowSkModal(false)}
         />
       )}
@@ -1818,6 +2655,8 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
           </div>
         </div>
       )}
+
+      {dialogNode}
     </div>
   );
 };

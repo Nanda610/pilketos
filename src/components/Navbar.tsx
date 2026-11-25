@@ -9,7 +9,7 @@
  */
 
 import React from 'react';
-import { Vote, BarChart3, Clock, Radio, Lock, LogOut, ShieldCheck, Users } from 'lucide-react';
+import { Vote, BarChart3, Clock, Radio, Lock, LogOut, ShieldCheck, Users, Film } from 'lucide-react';
 import { SchoolConfig, RealtimeSyncMetadata, AuthSession, UserRole } from '../types';
 import { formatAppTimeDisplay } from '../lib/realtimeSync';
 import { BloggerIcon } from './BloggerIcon';
@@ -26,6 +26,7 @@ interface NavbarProps {
   onOpenLoginModal?: (targetRole?: UserRole) => void;
   onLogout?: () => void;
   onOpenShareBlogger?: () => void;
+  onOpenOpeningVideo?: () => void;
 }
 
 export const Navbar: React.FC<NavbarProps> = ({
@@ -38,6 +39,7 @@ export const Navbar: React.FC<NavbarProps> = ({
   onOpenLoginModal,
   onLogout,
   onOpenShareBlogger,
+  onOpenOpeningVideo,
 }) => {
   const formattedClock = formatAppTimeDisplay(appTimeMs);
 
@@ -84,7 +86,7 @@ export const Navbar: React.FC<NavbarProps> = ({
         <nav className="hidden md:flex items-center gap-1 p-1 glass-tab-bar rounded-2xl">
           <button
             onClick={() => handleNavClick('PUBLIC')}
-            className={`px-3.5 py-1.5 text-xs font-semibold rounded-xl transition-all cursor-pointer ${
+            className={`px-2.5 lg:px-3 py-1.5 text-xs font-semibold rounded-xl transition-all cursor-pointer whitespace-nowrap ${
               currentView === 'PUBLIC'
                 ? 'bg-white text-sky-600 shadow-xs font-bold border border-white/90'
                 : 'text-slate-600 hover:text-slate-900 hover:bg-white/40'
@@ -95,7 +97,7 @@ export const Navbar: React.FC<NavbarProps> = ({
 
           <button
             onClick={() => handleNavClick('BOOTH')}
-            className={`px-3.5 py-1.5 text-xs font-semibold rounded-xl transition-all cursor-pointer ${
+            className={`px-2.5 lg:px-3 py-1.5 text-xs font-semibold rounded-xl transition-all cursor-pointer whitespace-nowrap ${
               currentView === 'BOOTH'
                 ? 'bg-white text-sky-600 shadow-xs font-bold border border-white/90'
                 : 'text-slate-600 hover:text-slate-900 hover:bg-white/40'
@@ -106,25 +108,25 @@ export const Navbar: React.FC<NavbarProps> = ({
 
           <button
             onClick={() => handleNavClick('PANITIA')}
-            className={`px-3.5 py-1.5 text-xs font-semibold rounded-xl transition-all cursor-pointer flex items-center gap-1.5 ${
+            className={`px-2.5 lg:px-3 py-1.5 text-xs font-semibold rounded-xl transition-all cursor-pointer whitespace-nowrap flex items-center gap-1.5 ${
               currentView === 'PANITIA'
                 ? 'bg-white text-sky-600 shadow-xs font-bold border border-white/90'
                 : 'text-slate-600 hover:text-slate-900 hover:bg-white/40'
             }`}
           >
-            {!activeSession && <Lock className="w-3 h-3 text-slate-400" />}
+            {!activeSession && <Lock className="w-3 h-3 text-slate-400 shrink-0" />}
             <span>Portal Panitia</span>
           </button>
 
           <button
             onClick={() => handleNavClick('ADMIN')}
-            className={`px-3.5 py-1.5 text-xs font-semibold rounded-xl transition-all cursor-pointer flex items-center gap-1.5 ${
+            className={`px-2.5 lg:px-3 py-1.5 text-xs font-semibold rounded-xl transition-all cursor-pointer whitespace-nowrap flex items-center gap-1.5 ${
               currentView === 'ADMIN'
                 ? 'bg-white text-sky-600 shadow-xs font-bold border border-white/90'
                 : 'text-slate-600 hover:text-slate-900 hover:bg-white/40'
             }`}
           >
-            {(!activeSession || activeSession.role !== 'admin') && <Lock className="w-3 h-3 text-slate-400" />}
+            {(!activeSession || activeSession.role !== 'admin') && <Lock className="w-3 h-3 text-slate-400 shrink-0" />}
             <span>Admin Sekolah</span>
           </button>
         </nav>
@@ -156,15 +158,28 @@ export const Navbar: React.FC<NavbarProps> = ({
             <button
               type="button"
               onClick={() => onOpenLoginModal?.('panitia')}
-              className="hidden sm:flex items-center gap-1 px-2.5 py-1.5 rounded-xl border border-slate-300/80 bg-white/80 hover:bg-white text-slate-700 hover:text-slate-900 text-xs font-bold transition-all cursor-pointer shadow-2xs"
+              className="hidden sm:flex items-center gap-1 px-2.5 py-1.5 rounded-xl border border-slate-300/80 bg-white/80 hover:bg-white text-slate-700 hover:text-slate-900 text-xs font-bold transition-all cursor-pointer shadow-2xs whitespace-nowrap"
               title="Masuk sebagai Panitia atau Admin"
             >
-              <Lock className="w-3 h-3 text-slate-500" />
+              <Lock className="w-3 h-3 text-slate-500 shrink-0" />
               <span>Login Petugas</span>
             </button>
           )}
 
 
+
+          {onOpenOpeningVideo && (
+            <button
+              type="button"
+              onClick={onOpenOpeningVideo}
+              className="hidden sm:inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl border border-rose-200/80 bg-rose-50/80 hover:bg-rose-100 text-rose-700 text-xs font-bold transition-all cursor-pointer shadow-2xs whitespace-nowrap"
+              title="Putar Video Opening Aplikasi"
+              aria-label="Putar Video Opening"
+            >
+              <Film className="w-3.5 h-3.5 text-rose-600 shrink-0" />
+              <span className="hidden xl:inline">Opening</span>
+            </button>
+          )}
 
           {/* Unified Application Clock & Online Sync Indicator */}
           <div
@@ -256,6 +271,17 @@ export const Navbar: React.FC<NavbarProps> = ({
         </button>
 
 
+
+        {onOpenOpeningVideo && (
+          <button
+            type="button"
+            onClick={onOpenOpeningVideo}
+            className="px-2.5 py-1.5 rounded-xl bg-rose-50 border border-rose-200 text-rose-700 font-bold whitespace-nowrap flex items-center gap-1 text-[10px] cursor-pointer"
+          >
+            <Film className="w-3 h-3" />
+            <span>Video Opening</span>
+          </button>
+        )}
 
         {activeSession ? (
           <button

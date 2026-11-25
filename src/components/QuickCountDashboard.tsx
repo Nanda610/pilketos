@@ -13,12 +13,13 @@ import { motion, AnimatePresence } from 'motion/react';
 import { 
   Users, CheckCircle2, Clock, Vote, ChevronRight, Play, Pause, X,
   BarChart3, PieChart, Volume2, VolumeX, RotateCcw,
-  Trophy, PartyPopper, Flame, Radio
+  Trophy, PartyPopper, Flame, Radio, Share2, Check
 } from 'lucide-react';
 import { SchoolConfig, ElectionSummary, Candidate, RealtimeSyncMetadata } from '../types';
 import { CandidateAvatar, SchoolCrestLogo } from './CandidateAvatar';
 import { CandidateVideoDisplay } from './CandidateVideoDisplay';
 import { formatAppTimeDisplay, evaluateVotingSchedule } from '../lib/realtimeSync';
+import { getTabulationLeaderInfo } from '../lib/tabulation';
 import { electionStore } from '../lib/store';
 import { GarudaIcon } from './GarudaIcon';
 import { BloggerIcon } from './BloggerIcon';
@@ -30,6 +31,7 @@ interface QuickCountDashboardProps {
   syncMeta: RealtimeSyncMetadata;
   onNavigateToBooth: () => void;
   onOpenShareBlogger?: () => void;
+  onOpenOpeningVideo?: () => void;
 }
 
 // Helper component for smooth numeric counter animation ("pencapaian hasil angka")
@@ -105,6 +107,7 @@ export const QuickCountDashboard: React.FC<QuickCountDashboardProps> = ({
   syncMeta,
   onNavigateToBooth,
   onOpenShareBlogger,
+  onOpenOpeningVideo,
 }) => {
   const [selectedCandidate, setSelectedCandidate] = useState<Candidate | null>(null);
   const [chartView, setChartView] = useState<'bar' | 'donut'>('bar');
@@ -136,10 +139,13 @@ export const QuickCountDashboard: React.FC<QuickCountDashboardProps> = ({
   } | null>(null);
   const [highlightCandidateId, setHighlightCandidateId] = useState<string | null>(null);
   const [isManualSyncing, setIsManualSyncing] = useState(false);
+  const [copiedLiveLink, setCopiedLiveLink] = useState(false);
 
   // Track previous counts to detect real-time vote transactions coming from Bilik Suara
   const prevTotalVotedRef = useRef<number>(summary.totalVoted);
   const prevCountsRef = useRef<Record<string, number>>({});
+  const alertTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const highlightTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
     // If total votes increased, detect which candidate gained the vote and trigger live visual notification
@@ -150,22 +156,23 @@ export const QuickCountDashboard: React.FC<QuickCountDashboardProps> = ({
       });
 
       if (gained) {
+        if (highlightTimerRef.current) clearTimeout(highlightTimerRef.current);
+        if (alertTimerRef.current) clearTimeout(alertTimerRef.current);
+
         setHighlightCandidateId(gained.candidate.id);
         setNewVoteAlert({
           candidateName: `${gained.candidate.chairmanName} & ${gained.candidate.viceChairmanName}`,
           ballotNumber: gained.candidate.ballotNumber,
-          timestamp: new Date().toLocaleTimeString('id-ID'),
+          timestamp: `${formatAppTimeDisplay(electionStore.getAppTimeMs()).timeString} WIB`,
           totalVotes: summary.totalVoted,
         });
 
-        // Clear highlight after 4 seconds
-        setTimeout(() => {
-          setHighlightCandidateId((curr) => (curr === gained.candidate.id ? null : curr));
+        highlightTimerRef.current = setTimeout(() => {
+          setHighlightCandidateId(null);
         }, 4000);
 
-        // Auto-dismiss banner after 6 seconds
-        setTimeout(() => {
-          setNewVoteAlert((curr) => (curr?.timestamp ? null : curr));
+        alertTimerRef.current = setTimeout(() => {
+          setNewVoteAlert(null);
         }, 6000);
       }
     }
@@ -178,6 +185,32 @@ export const QuickCountDashboard: React.FC<QuickCountDashboardProps> = ({
     prevCountsRef.current = currentMap;
   }, [summary.totalVoted, summary.candidatesResults]);
 
+  useEffect(() => {
+    return () => {
+      if (highlightTimerRef.current) clearTimeout(highlightTimerRef.current);
+      if (alertTimerRef.current) clearTimeout(alertTimerRef.current);
+    };
+  }, []);
+
+  const handleCopyLiveLink = async () => {
+    if (typeof window === 'undefined') return;
+    const liveUrl = `${window.location.origin}/?live=1`;
+    try {
+      await navigator.clipboard.writeText(liveUrl);
+    } catch {
+      const textarea = document.createElement('textarea');
+      textarea.value = liveUrl;
+      textarea.style.position = 'fixed';
+      textarea.style.opacity = '0';
+      document.body.appendChild(textarea);
+      textarea.select();
+      document.execCommand('copy');
+      document.body.removeChild(textarea);
+    }
+    setCopiedLiveLink(true);
+    setTimeout(() => setCopiedLiveLink(false), 2500);
+  };
+
   // Keep selectedCandidate synced if Admin/Panitia edits candidate while modal is open
   useEffect(() => {
     if (!selectedCandidate) return;
@@ -187,8 +220,10 @@ export const QuickCountDashboard: React.FC<QuickCountDashboardProps> = ({
     }
   }, [candidatesResults, selectedCandidate]);
 
-  // Find current leading candidate
-  const leadingCandidate = [...candidatesResults].sort((a, b) => b.voteCount - a.voteCount)[0];
+  // Find current leading / tied candidates accurately
+  const leaderInfo = getTabulationLeaderInfo(candidatesResults);
+  const leadingCandidate = leaderInfo.topCandidate;
+  const leaderIdSet = new Set(leaderInfo.leaders.map((l) => l.candidate.id));
 
   // Trigger celebratory confetti when requested or when inspecting results
   const fireCelebrationConfetti = (originX: number = 0.5) => {
@@ -247,7 +282,7 @@ export const QuickCountDashboard: React.FC<QuickCountDashboardProps> = ({
 
         <div className="relative z-10 flex flex-col lg:flex-row lg:items-center justify-between gap-6">
           <div className="flex items-start gap-4">
-            <SchoolCrestLogo size={64} type={school.type} logoUrl={school.logoUrl} className="mt-1 shadow-lg ring-2 ring-white/20" />
+            <SchoolCrestLogo size={64} shape="circle" type={school.type} logoUrl={school.logoUrl} className="mt-1 shadow-lg ring-2 ring-white/20" />
             <div>
               <div className="flex flex-wrap items-center gap-2 text-xs font-semibold tracking-wider text-sky-300 uppercase">
                 <span data-testid="hero-school-name">{school.type} {school.name}</span>
@@ -283,6 +318,17 @@ export const QuickCountDashboard: React.FC<QuickCountDashboardProps> = ({
           </div>
 
           <div className="flex flex-col sm:flex-row items-center gap-3 shrink-0">
+            {onOpenOpeningVideo && (
+              <button
+                type="button"
+                onClick={onOpenOpeningVideo}
+                className="w-full sm:w-auto inline-flex items-center justify-center gap-2 px-4 py-3.5 rounded-2xl bg-white/10 hover:bg-white/20 text-white border border-white/25 font-bold text-xs shadow-lg transition-all cursor-pointer"
+                title="Putar Video Pembukaan Aplikasi"
+              >
+                <Play className="w-4 h-4 text-rose-400 fill-rose-400" />
+                <span>Video Opening</span>
+              </button>
+            )}
             <button
               onClick={onNavigateToBooth}
               className="w-full sm:w-auto inline-flex items-center justify-center gap-2 px-6 py-3.5 rounded-2xl bg-gradient-to-r from-sky-400 to-sky-500 hover:from-sky-300 hover:to-sky-400 text-slate-950 font-black text-sm shadow-xl shadow-sky-500/25 transition-all hover:scale-[1.02] active:scale-[0.98] cursor-pointer"
@@ -378,6 +424,25 @@ export const QuickCountDashboard: React.FC<QuickCountDashboardProps> = ({
             </div>
 
             <div className="flex flex-wrap items-center gap-2">
+              {false && (
+                <button
+                  onClick={handleCopyLiveLink}
+                  className={`px-3 py-1.5 rounded-xl text-xs font-bold border shadow-xs flex items-center gap-1.5 transition-all hover:scale-105 active:scale-95 cursor-pointer ${
+                    copiedLiveLink
+                      ? 'bg-emerald-600 text-white border-emerald-600'
+                      : 'bg-white/80 hover:bg-white text-sky-700 border-sky-200/80'
+                  }`}
+                  title="Salin tautan siaran langsung Hitung Cepat untuk dibagikan ke siswa, guru, dan publik"
+                >
+                  {copiedLiveLink ? (
+                    <Check className="w-3.5 h-3.5" />
+                  ) : (
+                    <Share2 className="w-3.5 h-3.5" />
+                  )}
+                  <span>{copiedLiveLink ? 'Link Live Tersalin!' : 'Bagikan Link Live'}</span>
+                </button>
+              )}
+
               <button
                 onClick={async () => {
                   setIsManualSyncing(true);
@@ -394,10 +459,20 @@ export const QuickCountDashboard: React.FC<QuickCountDashboardProps> = ({
 
 
 
-              {leadingCandidate && leadingCandidate.voteCount > 0 && (
+              {leaderInfo.hasVotes && leadingCandidate && (
                 <span className="text-xs bg-emerald-500/10 text-emerald-800 border border-emerald-500/25 px-3 py-1 rounded-full font-bold flex items-center gap-1.5 backdrop-blur-xs">
                   <Trophy className="w-3.5 h-3.5 text-amber-500" />
-                  <span>Unggul: Paslon {leadingCandidate.candidate.ballotNumber < 10 ? `0${leadingCandidate.candidate.ballotNumber}` : leadingCandidate.candidate.ballotNumber}</span>
+                  <span>
+                    {leaderInfo.isTie
+                      ? `Imbang: Paslon ${leaderInfo.leaders
+                          .map((l) => (l.candidate.ballotNumber < 10 ? `0${l.candidate.ballotNumber}` : `${l.candidate.ballotNumber}`))
+                          .join(' & ')}`
+                      : `Unggul: Paslon ${
+                          leadingCandidate.candidate.ballotNumber < 10
+                            ? `0${leadingCandidate.candidate.ballotNumber}`
+                            : leadingCandidate.candidate.ballotNumber
+                        }`}
+                  </span>
                 </span>
               )}
 
@@ -446,11 +521,21 @@ export const QuickCountDashboard: React.FC<QuickCountDashboardProps> = ({
             )}
           </AnimatePresence>
 
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-5">
-            {candidatesResults.map((result) => {
-              const cand = result.candidate;
-              const isLeading = leadingCandidate?.candidate.id === cand.id && result.voteCount > 0;
-              const isHighlighted = highlightCandidateId === cand.id;
+          {candidatesResults.length === 0 ? (
+            <div className="rounded-3xl glass-card p-10 border border-white/80 shadow-md text-center space-y-2">
+              <p className="text-sm font-bold text-slate-700">
+                Belum ada pasangan calon terdaftar pada periode ini.
+              </p>
+              <p className="text-xs text-slate-500">
+                Panitia dapat mendaftarkan pasangan calon melalui Portal Panitia agar tampil otomatis di Papan Hitung Cepat dan Bilik Suara.
+              </p>
+            </div>
+          ) : (
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-5">
+              {candidatesResults.map((result) => {
+                const cand = result.candidate;
+                const isLeading = leaderInfo.hasVotes && leaderIdSet.has(cand.id);
+                const isHighlighted = highlightCandidateId === cand.id;
 
               return (
                 <motion.div
@@ -475,11 +560,11 @@ export const QuickCountDashboard: React.FC<QuickCountDashboardProps> = ({
                     </div>
                   )}
 
-                  {/* Subtle glow badge for leading paslon */}
+                  {/* Subtle glow badge for leading/tied paslon */}
                   {isLeading && !isHighlighted && (
                     <div className="absolute top-0 right-0 bg-gradient-to-l from-amber-400 to-sky-500 text-slate-950 font-black text-[10px] uppercase px-3 py-1 rounded-bl-2xl shadow-xs flex items-center gap-1">
                       <Flame className="w-3 h-3 fill-current text-rose-600" />
-                      <span>Memimpin ({result.percentage}%)</span>
+                      <span>{leaderInfo.isTie ? `Imbang (${result.percentage}%)` : `Memimpin (${result.percentage}%)`}</span>
                     </div>
                   )}
 
@@ -582,7 +667,8 @@ export const QuickCountDashboard: React.FC<QuickCountDashboardProps> = ({
                 </motion.div>
               );
             })}
-          </div>
+            </div>
+          )}
         </div>
 
         {/* Right Column: Dynamic Visual Charts & Class Breakdown (4 cols) */}
@@ -616,7 +702,11 @@ export const QuickCountDashboard: React.FC<QuickCountDashboardProps> = ({
               </div>
             </div>
 
-            {chartView === 'bar' ? (
+            {candidatesResults.length === 0 ? (
+              <div className="py-8 text-center text-xs text-slate-500 border border-dashed border-slate-200 rounded-2xl">
+                Belum ada pasangan calon untuk ditampilkan pada grafik distribusi suara.
+              </div>
+            ) : chartView === 'bar' ? (
               /* Bar Chart View */
               <div className="space-y-4 pt-2">
                 {candidatesResults.map((r, i) => {
@@ -692,6 +782,10 @@ export const QuickCountDashboard: React.FC<QuickCountDashboardProps> = ({
                   </div>
                 </div>
 
+                {totalVoted === 0 && (
+                  <p className="text-[11px] text-slate-500 mt-2">Belum ada suara sah masuk</p>
+                )}
+
                 <div className="mt-4 grid grid-cols-1 gap-2 w-full text-xs">
                   {candidatesResults.map((r, idx) => {
                     const dotColors = ['bg-blue-500', 'bg-emerald-500', 'bg-amber-500', 'bg-purple-500'];
@@ -721,26 +815,32 @@ export const QuickCountDashboard: React.FC<QuickCountDashboardProps> = ({
               <p className="text-xs text-slate-500">Pemantauan kehadiran pemilih di bilik suara</p>
             </div>
 
-            <div className="space-y-3 max-h-56 overflow-y-auto pr-1">
-              {classParticipation.map((cp) => (
-                <div key={cp.className} className="space-y-1">
-                  <div className="flex items-center justify-between text-xs">
-                    <span className="font-semibold text-slate-700">{cp.className}</span>
-                    <span className="text-slate-500 font-mono-numbers font-medium">
-                      {cp.voted}/{cp.total} ({cp.percentage}%)
-                    </span>
+            {classParticipation.length === 0 ? (
+              <div className="py-6 text-center text-xs text-slate-500 border border-dashed border-slate-200 rounded-2xl">
+                Belum ada data pemilih (DPT) pada periode ini.
+              </div>
+            ) : (
+              <div className="space-y-3 max-h-56 overflow-y-auto pr-1">
+                {classParticipation.map((cp) => (
+                  <div key={cp.className} className="space-y-1">
+                    <div className="flex items-center justify-between text-xs">
+                      <span className="font-semibold text-slate-700">{cp.className}</span>
+                      <span className="text-slate-500 font-mono-numbers font-medium">
+                        {cp.voted}/{cp.total} ({cp.percentage}%)
+                      </span>
+                    </div>
+                    <div className="w-full bg-slate-200/60 rounded-full h-2 overflow-hidden p-0.5 border border-white/60">
+                      <div
+                        className={`h-full rounded-full transition-all duration-300 ${
+                          cp.percentage >= 80 ? 'bg-emerald-500' : cp.percentage >= 50 ? 'bg-sky-500' : 'bg-amber-500'
+                        }`}
+                        style={{ width: `${cp.percentage}%` }}
+                      ></div>
+                    </div>
                   </div>
-                  <div className="w-full bg-slate-200/60 rounded-full h-2 overflow-hidden p-0.5 border border-white/60">
-                    <div
-                      className={`h-full rounded-full transition-all duration-300 ${
-                        cp.percentage >= 80 ? 'bg-emerald-500' : cp.percentage >= 50 ? 'bg-sky-500' : 'bg-amber-500'
-                      }`}
-                      style={{ width: `${cp.percentage}%` }}
-                    ></div>
-                  </div>
-                </div>
-              ))}
-            </div>
+                ))}
+              </div>
+            )}
           </div>
         </div>
       </div>
@@ -849,7 +949,7 @@ export const QuickCountDashboard: React.FC<QuickCountDashboardProps> = ({
       )}
 
       {/* SELEBRASI & SELEBRASI PEMENANG MODAL */}
-      {showCelebrationModal && leadingCandidate && (
+      {showCelebrationModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/75 backdrop-blur-xs">
           <div className="relative w-full max-w-2xl bg-white rounded-3xl shadow-2xl border-2 border-amber-300 overflow-hidden max-h-[90vh] flex flex-col animate-in fade-in zoom-in-95 duration-200">
             {/* Header Banner */}
@@ -864,7 +964,13 @@ export const QuickCountDashboard: React.FC<QuickCountDashboardProps> = ({
                     <span>SELEBRASI PEROLEHAN SUARA & PEMENANG</span>
                   </div>
                   <h3 className="text-xl font-black text-slate-950 leading-tight mt-0.5">
-                    Pencapaian Paslon No. {leadingCandidate.candidate.ballotNumber}
+                    {!leaderInfo.hasVotes
+                      ? candidatesResults.length === 0
+                        ? 'Belum Ada Pasangan Calon'
+                        : 'Menunggu Suara Masuk Pertama'
+                      : leaderInfo.isTie
+                      ? `Perolehan Suara Imbang (${leaderInfo.maxVotes} Suara)`
+                      : `Pencapaian Paslon No. ${leadingCandidate!.candidate.ballotNumber}`}
                   </h3>
                 </div>
               </div>
@@ -879,60 +985,113 @@ export const QuickCountDashboard: React.FC<QuickCountDashboardProps> = ({
 
             {/* Modal Content */}
             <div className="p-6 space-y-6 overflow-y-auto">
-              {/* Dual Candidate Winner Spotlight Card */}
-              <div className="p-5 rounded-2xl bg-gradient-to-br from-amber-50 via-sky-50 to-indigo-50 border border-amber-200 shadow-sm flex flex-col sm:flex-row items-center justify-between gap-5 text-center sm:text-left">
-                <div className="flex items-center gap-4">
-                  <CandidateAvatar
-                    ballotNumber={leadingCandidate.candidate.ballotNumber}
-                    chairmanName={leadingCandidate.candidate.chairmanName}
-                    viceChairmanName={leadingCandidate.candidate.viceChairmanName}
-                    chairmanPhotoUrl={leadingCandidate.candidate.chairmanPhotoUrl}
-                    viceChairmanPhotoUrl={leadingCandidate.candidate.viceChairmanPhotoUrl}
-                    photoUrl={leadingCandidate.candidate.photoUrl}
-                    size="lg"
-                  />
-                  <div className="space-y-1">
-                    <span className="inline-flex items-center gap-1 text-[11px] font-extrabold uppercase bg-amber-200 text-amber-900 px-2.5 py-0.5 rounded-full">
-                      <Flame className="w-3 h-3 fill-current text-rose-600" />
-                      MEMIMPIN PEROLEHAN SUARA ({leadingCandidate.percentage}%)
-                    </span>
-                    <h4 className="text-base font-black text-slate-900">
-                      {leadingCandidate.candidate.chairmanName}
+              {!leaderInfo.hasVotes ? (
+                <div className="p-6 rounded-2xl bg-slate-50 border border-slate-200 text-center space-y-2">
+                  <p className="text-sm font-bold text-slate-800">
+                    {candidatesResults.length === 0
+                      ? 'Belum ada pasangan calon yang didaftarkan pada periode ini.'
+                      : `Belum ada suara sah masuk (${totalVoted} dari ${totalVoters} DPT).`}
+                  </p>
+                  <p className="text-xs text-slate-500">
+                    Setelah siswa menyalurkan hak suara di Bilik Suara, statistik pemenang akan ditampilkan secara otomatis.
+                  </p>
+                </div>
+              ) : leaderInfo.isTie ? (
+                <div className="space-y-4">
+                  <div className="p-4 rounded-2xl bg-amber-50 border border-amber-200 text-xs text-amber-950 font-semibold">
+                    Saat ini terdapat {leaderInfo.leaders.length} pasangan calon dengan perolehan suara imbang tertinggi ({leaderInfo.maxVotes} suara sah):
+                  </div>
+                  <div className="grid grid-cols-1 gap-3">
+                    {leaderInfo.leaders.map((leader) => (
+                      <div
+                        key={leader.candidate.id}
+                        className="p-4 rounded-2xl bg-gradient-to-br from-amber-50 via-sky-50 to-indigo-50 border border-amber-200 flex items-center justify-between gap-4"
+                      >
+                        <div className="flex items-center gap-3">
+                          <CandidateAvatar
+                            ballotNumber={leader.candidate.ballotNumber}
+                            chairmanName={leader.candidate.chairmanName}
+                            viceChairmanName={leader.candidate.viceChairmanName}
+                            chairmanPhotoUrl={leader.candidate.chairmanPhotoUrl}
+                            viceChairmanPhotoUrl={leader.candidate.viceChairmanPhotoUrl}
+                            photoUrl={leader.candidate.photoUrl}
+                            size="md"
+                          />
+                          <div>
+                            <span className="text-[10px] font-black uppercase bg-amber-200 text-amber-900 px-2 py-0.5 rounded-full">
+                              Paslon No. {leader.candidate.ballotNumber} · Imbang ({leader.percentage}%)
+                            </span>
+                            <h4 className="text-sm font-black text-slate-900 mt-1">
+                              {leader.candidate.chairmanName} &amp; {leader.candidate.viceChairmanName}
+                            </h4>
+                          </div>
+                        </div>
+                        <div className="text-right shrink-0">
+                          <div className="text-2xl font-black text-slate-900 font-mono-numbers">{leader.voteCount}</div>
+                          <span className="text-[11px] font-bold text-sky-600">Suara Sah</span>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ) : leadingCandidate ? (
+                <>
+                  {/* Dual Candidate Winner Spotlight Card */}
+                  <div className="p-5 rounded-2xl bg-gradient-to-br from-amber-50 via-sky-50 to-indigo-50 border border-amber-200 shadow-sm flex flex-col sm:flex-row items-center justify-between gap-5 text-center sm:text-left">
+                    <div className="flex items-center gap-4">
+                      <CandidateAvatar
+                        ballotNumber={leadingCandidate.candidate.ballotNumber}
+                        chairmanName={leadingCandidate.candidate.chairmanName}
+                        viceChairmanName={leadingCandidate.candidate.viceChairmanName}
+                        chairmanPhotoUrl={leadingCandidate.candidate.chairmanPhotoUrl}
+                        viceChairmanPhotoUrl={leadingCandidate.candidate.viceChairmanPhotoUrl}
+                        photoUrl={leadingCandidate.candidate.photoUrl}
+                        size="lg"
+                      />
+                      <div className="space-y-1">
+                        <span className="inline-flex items-center gap-1 text-[11px] font-extrabold uppercase bg-amber-200 text-amber-900 px-2.5 py-0.5 rounded-full">
+                          <Flame className="w-3 h-3 fill-current text-rose-600" />
+                          MEMIMPIN PEROLEHAN SUARA ({leadingCandidate.percentage}%)
+                        </span>
+                        <h4 className="text-base font-black text-slate-900">
+                          {leadingCandidate.candidate.chairmanName}
+                        </h4>
+                        <p className="text-xs text-slate-600">
+                          & {leadingCandidate.candidate.viceChairmanName}
+                        </p>
+                        <p className="text-xs italic text-slate-500 font-medium">
+                          "{leadingCandidate.candidate.motto}"
+                        </p>
+                      </div>
+                    </div>
+
+                    <div className="bg-white/80 backdrop-blur-xs p-4 rounded-2xl border border-amber-200/80 text-center shrink-0 min-w-[130px]">
+                      <span className="text-[10px] font-extrabold uppercase tracking-wider text-slate-400">Total Perolehan</span>
+                      <div className="text-3xl font-black text-slate-900 font-mono-numbers mt-0.5">
+                        {leadingCandidate.voteCount}
+                      </div>
+                      <span className="text-xs font-bold text-sky-600">Suara Sah</span>
+                    </div>
+                  </div>
+
+                  {/* Visi & Misi Ringkas */}
+                  <div className="p-4 rounded-xl bg-slate-50 border border-slate-200 space-y-2">
+                    <h4 className="text-xs font-bold uppercase text-slate-500 tracking-wider">
+                      Visi & Misi Kemenangan
                     </h4>
-                    <p className="text-xs text-slate-600">
-                      & {leadingCandidate.candidate.viceChairmanName}
-                    </p>
-                    <p className="text-xs italic text-slate-500 font-medium">
-                      "{leadingCandidate.candidate.motto}"
+                    <p className="text-xs font-medium text-slate-800 leading-relaxed bg-white p-3 rounded-lg border border-slate-200/80">
+                      {leadingCandidate.candidate.vision}
                     </p>
                   </div>
-                </div>
 
-                <div className="bg-white/80 backdrop-blur-xs p-4 rounded-2xl border border-amber-200/80 text-center shrink-0 min-w-[130px]">
-                  <span className="text-[10px] font-extrabold uppercase tracking-wider text-slate-400">Total Perolehan</span>
-                  <div className="text-3xl font-black text-slate-900 font-mono-numbers mt-0.5">
-                    {leadingCandidate.voteCount}
-                  </div>
-                  <span className="text-xs font-bold text-sky-600">Suara Sah</span>
-                </div>
-              </div>
-
-              {/* Visi & Misi Ringkas */}
-              <div className="p-4 rounded-xl bg-slate-50 border border-slate-200 space-y-2">
-                <h4 className="text-xs font-bold uppercase text-slate-500 tracking-wider">
-                  Visi & Misi Kemenangan
-                </h4>
-                <p className="text-xs font-medium text-slate-800 leading-relaxed bg-white p-3 rounded-lg border border-slate-200/80">
-                  {leadingCandidate.candidate.vision}
-                </p>
-              </div>
-
-              {/* Campaign / Victory Video Player Display */}
-              <CandidateVideoDisplay
-                candidate={leadingCandidate.candidate}
-                title="Video Selebrasi & Orasi Kemenangan Paslon"
-                autoPlay={true}
-              />
+                  {/* Campaign / Victory Video Player Display */}
+                  <CandidateVideoDisplay
+                    candidate={leadingCandidate.candidate}
+                    title="Video Selebrasi & Orasi Kemenangan Paslon"
+                    autoPlay={true}
+                  />
+                </>
+              ) : null}
             </div>
 
             {/* Modal Footer */}

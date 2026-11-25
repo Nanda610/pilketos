@@ -14,11 +14,13 @@ import { SchoolConfig, ElectionSummary, CommitteeMember } from '../types';
 import { Printer, X, ShieldCheck, Eye, ZoomIn, ZoomOut, Check, Sliders, FileText, Maximize2, Minimize2 } from 'lucide-react';
 import { SchoolCrestLogo } from './CandidateAvatar';
 import { clampZoomScale, formatOfficialBahpNumber } from '../utils/printIsolation';
+import { getTabulationLeaderInfo } from '../lib/tabulation';
 
 interface PrintBeritaAcaraProps {
   school: SchoolConfig;
   summary: ElectionSummary;
   committee: CommitteeMember[];
+  appTimeMs?: number;
   onClose: () => void;
 }
 
@@ -26,6 +28,7 @@ export const PrintBeritaAcara: React.FC<PrintBeritaAcaraProps> = ({
   school,
   summary,
   committee,
+  appTimeMs,
   onClose,
 }) => {
   const { period, totalVoters, totalVoted, totalUnvoted, participationPercentage, candidatesResults } = summary;
@@ -45,15 +48,19 @@ export const PrintBeritaAcara: React.FC<PrintBeritaAcaraProps> = ({
     };
   }, []);
 
-  // Find winner
-  const sortedCandidates = [...candidatesResults].sort((a, b) => b.voteCount - a.voteCount);
-  const elected = sortedCandidates[0];
+  // Determine winner / tie / no-votes state accurately
+  const leaderInfo = getTabulationLeaderInfo(candidatesResults);
+  const leaderIdSet = new Set(leaderInfo.leaders.map((l) => l.candidate.id));
+  const abstainPercentage =
+    totalVoters > 0 ? Number(Math.max(0, 100 - participationPercentage).toFixed(2)) : 0;
 
-  const chairmanCommittee = committee.find((c) => c.role === 'Ketua Panitia') || {
-    memberName: 'Dimas Arya Pratama',
-    skNumber: '035/SK-KS/SMPN1/VIII/2026',
-    skDate: '2026-08-15',
-  };
+  const chairmanCommittee =
+    committee.find((c) => c.role.toLowerCase().includes('ketua')) ||
+    committee[0] || {
+      memberName: '(Belum Ditetapkan)',
+      skNumber: '-',
+      skDate: '-',
+    };
 
   const handlePrint = () => {
     window.print();
@@ -64,7 +71,7 @@ export const PrintBeritaAcara: React.FC<PrintBeritaAcaraProps> = ({
     day: 'numeric',
     month: 'long',
     year: 'numeric',
-  }).format(new Date());
+  }).format(new Date(typeof appTimeMs === 'number' ? appTimeMs : Date.now()));
 
   return createPortal(
     <div className="print-portal-root fixed inset-0 z-[9999] overflow-y-auto bg-slate-200 p-2 sm:p-4 md:p-8 print:p-0 print:m-0 print:bg-white print:overflow-visible">
@@ -285,9 +292,11 @@ export const PrintBeritaAcara: React.FC<PrintBeritaAcaraProps> = ({
               <SchoolCrestLogo size={64} type={school.type} logoUrl={school.logoUrl} />
             </div>
             <div className="flex-1 px-4">
-              <p className="text-xs uppercase font-sans tracking-widest text-slate-600 font-semibold">
-                PEMERINTAH PROVINSI {school.province.toUpperCase()}
-              </p>
+              {school.province && (
+                <p className="text-xs uppercase font-sans tracking-widest text-slate-600 font-semibold">
+                  PEMERINTAH PROVINSI {school.province.toUpperCase()}
+                </p>
+              )}
               <p className="text-xs uppercase font-sans tracking-widest text-slate-600 font-semibold">
                 DINAS PENDIDIKAN DAN KEBUDAYAAN
               </p>
@@ -295,11 +304,13 @@ export const PrintBeritaAcara: React.FC<PrintBeritaAcaraProps> = ({
                 {school.name}
               </h1>
               <p className="text-xs font-sans text-slate-600 mt-1">
-                Alamat: {school.address}, {school.city} · NPSN: {school.npsn} · Telp: {school.phone}
+                Alamat: {school.address || '-'}{school.city ? `, ${school.city}` : ''} · NPSN: {school.npsn || '-'}{school.phone ? ` · Telp: ${school.phone}` : ''}
               </p>
-              <p className="text-xs font-sans text-slate-500">
-                Laman Resmi: {school.website}
-              </p>
+              {school.website && (
+                <p className="text-xs font-sans text-slate-500">
+                  Laman Resmi: {school.website}
+                </p>
+              )}
             </div>
             <div className="w-20 flex-shrink-0 flex justify-center">
               {showQrCode && (
@@ -359,7 +370,7 @@ export const PrintBeritaAcara: React.FC<PrintBeritaAcaraProps> = ({
                 </tr>
                 <tr>
                   <td className="p-2 bg-slate-50 font-medium">3. Jumlah Pemilih yang Tidak Hadir / Abstain</td>
-                  <td className="p-2 font-bold font-mono text-right text-slate-600">{totalUnvoted} Orang ({Number((100 - participationPercentage).toFixed(2))}%)</td>
+                  <td className="p-2 font-bold font-mono text-right text-slate-600">{totalUnvoted} Orang ({abstainPercentage}%)</td>
                 </tr>
               </tbody>
             </table>
@@ -381,40 +392,87 @@ export const PrintBeritaAcara: React.FC<PrintBeritaAcaraProps> = ({
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-200">
-                {candidatesResults.map((res) => (
-                  <tr key={res.candidate.id} className={res.candidate.id === elected?.candidate.id ? 'bg-sky-50/60 font-semibold' : ''}>
-                    <td className="p-2 text-center font-bold font-mono">{res.candidate.ballotNumber}</td>
-                    <td className="p-2">
-                      <span className="font-bold text-slate-900">{res.candidate.chairmanName}</span> & {res.candidate.viceChairmanName}
+                {candidatesResults.length === 0 ? (
+                  <tr>
+                    <td colSpan={5} className="p-4 text-center text-slate-500 italic">
+                      Belum ada pasangan calon yang terdaftar pada periode ini.
                     </td>
-                    <td className="p-2 text-center text-slate-600">
-                      {res.candidate.chairmanClass} & {res.candidate.viceChairmanClass}
-                    </td>
-                    <td className="p-2 text-right font-mono font-bold">{res.voteCount} Suara</td>
-                    <td className="p-2 text-right font-mono font-bold text-sky-700">{res.percentage}%</td>
                   </tr>
-                ))}
+                ) : (
+                  candidatesResults.map((res) => (
+                    <tr
+                      key={res.candidate.id}
+                      className={leaderInfo.hasVotes && leaderIdSet.has(res.candidate.id) ? 'bg-sky-50/60 font-semibold' : ''}
+                    >
+                      <td className="p-2 text-center font-bold font-mono">{res.candidate.ballotNumber}</td>
+                      <td className="p-2">
+                        <span className="font-bold text-slate-900">{res.candidate.chairmanName}</span> & {res.candidate.viceChairmanName}
+                      </td>
+                      <td className="p-2 text-center text-slate-600">
+                        {res.candidate.chairmanClass} & {res.candidate.viceChairmanClass}
+                      </td>
+                      <td className="p-2 text-right font-mono font-bold">{res.voteCount} Suara</td>
+                      <td className="p-2 text-right font-mono font-bold text-sky-700">{res.percentage}%</td>
+                    </tr>
+                  ))
+                )}
               </tbody>
+              <tfoot className="bg-slate-100 border-t-2 border-slate-300 font-bold text-slate-900">
+                <tr>
+                  <td colSpan={3} className="p-2 text-right uppercase tracking-wide">
+                    Jumlah Total Suara Sah Masuk
+                  </td>
+                  <td className="p-2 text-right font-mono">{totalVoted} Suara</td>
+                  <td className="p-2 text-right font-mono text-sky-800">{totalVoted > 0 ? '100%' : '0%'}</td>
+                </tr>
+              </tfoot>
             </table>
           </div>
 
-          {/* Section 3: Penetapan Pemenang */}
-          {elected && (
+          {/* Section 3: Penetapan Pemenang / Status Hasil */}
+          {candidatesResults.length > 0 && (
             <div className="print-avoid-break my-5 p-4 rounded-xl border border-slate-300 bg-slate-50 font-sans text-xs space-y-2">
               <h3 className="font-bold uppercase tracking-wider text-slate-900">
-                III. KEPUTUSAN PENETAPAN PASANGAN CALON TERPILIH
+                III. KEPUTUSAN PENETAPAN HASIL PEMILIHAN
               </h3>
-              <p className="leading-relaxed">
-                Berdasarkan hasil rekapitulasi penghitungan suara di atas, Panitia Pemilihan menetapkan bahwa Pasangan Calon dengan 
-                <strong> Nomor Urut {elected.candidate.ballotNumber}</strong> atas nama:
-              </p>
-              <div className="p-3 bg-white border border-slate-200 rounded-lg text-slate-900 font-semibold text-center text-sm">
-                {elected.candidate.chairmanName} (Ketua) & {elected.candidate.viceChairmanName} (Wakil Ketua)
-              </div>
-              <p className="leading-relaxed">
-                Dinyatakan secara sah sebagai <strong>Ketua dan Wakil Ketua {school.type} {school.name} Terpilih Periode {period.academicYear}</strong>{' '}
-                dan berhak untuk dilantik serta disahkan oleh Kepala Sekolah sesuai peraturan perundang-undangan yang berlaku.
-              </p>
+              {!leaderInfo.hasVotes ? (
+                <p className="leading-relaxed text-slate-700">
+                  Hingga Berita Acara sementara ini dicetak, belum terdapat suara sah yang masuk pada periode{' '}
+                  <strong>{period.periodName}</strong> sehingga pasangan calon terpilih belum dapat ditetapkan.
+                </p>
+              ) : leaderInfo.isTie ? (
+                <>
+                  <p className="leading-relaxed">
+                    Berdasarkan hasil rekapitulasi sementara di atas, terdapat perolehan suara <strong>IMBANG (SERI)</strong>{' '}
+                    sebanyak <strong>{leaderInfo.maxVotes} suara</strong> pada pasangan calon berikut:
+                  </p>
+                  <div className="p-3 bg-white border border-amber-300 rounded-lg text-slate-900 font-semibold text-center text-xs space-y-1">
+                    {leaderInfo.leaders.map((l) => (
+                      <div key={l.candidate.id}>
+                        Paslon No. {l.candidate.ballotNumber}: {l.candidate.chairmanName} &amp; {l.candidate.viceChairmanName} ({l.voteCount} Suara · {l.percentage}%)
+                      </div>
+                    ))}
+                  </div>
+                  <p className="leading-relaxed text-slate-700">
+                    Penetapan akhir akan ditentukan setelah seluruh pemilih menyalurkan suara atau melalui mekanisme penentuan suara lanjutan sesuai tata tertib pemilihan {school.type}.
+                  </p>
+                </>
+              ) : leaderInfo.topCandidate ? (
+                <>
+                  <p className="leading-relaxed">
+                    Berdasarkan hasil rekapitulasi penghitungan suara di atas, Panitia Pemilihan menetapkan bahwa Pasangan Calon dengan{' '}
+                    <strong>Nomor Urut {leaderInfo.topCandidate.candidate.ballotNumber}</strong> atas nama:
+                  </p>
+                  <div className="p-3 bg-white border border-slate-200 rounded-lg text-slate-900 font-semibold text-center text-sm">
+                    {leaderInfo.topCandidate.candidate.chairmanName} (Ketua) &amp; {leaderInfo.topCandidate.candidate.viceChairmanName} (Wakil Ketua)
+                  </div>
+                  <p className="leading-relaxed">
+                    Dinyatakan memperoleh suara terbanyak ({leaderInfo.topCandidate.voteCount} suara sah / {leaderInfo.topCandidate.percentage}%) sebagai{' '}
+                    <strong>Ketua dan Wakil Ketua {school.type} {school.name} Terpilih Periode {period.academicYear}</strong>{' '}
+                    dan berhak untuk dilantik serta disahkan oleh Kepala Sekolah sesuai peraturan perundang-undangan yang berlaku.
+                  </p>
+                </>
+              ) : null}
             </div>
           )}
 
@@ -464,9 +522,9 @@ export const PrintBeritaAcara: React.FC<PrintBeritaAcaraProps> = ({
 
               <div>
                 <p className="font-bold text-slate-900 underline underline-offset-2">
-                  {school.principalName}
+                  {school.principalName || '(Kepala Sekolah)'}
                 </p>
-                <p className="text-[11px] text-slate-500">NIP. {school.principalNip}</p>
+                <p className="text-[11px] text-slate-500">NIP. {school.principalNip?.trim() ? school.principalNip : '-'}</p>
               </div>
             </div>
           </div>

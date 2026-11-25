@@ -21,6 +21,7 @@ import {
   UserAccount,
   AuthSession,
   UserRole,
+  DeletedEntityTombstones,
 } from '../types';
 import {
   INITIAL_SCHOOL,
@@ -34,11 +35,21 @@ import {
 } from './initialData';
 import { generateRandomPin, hashPin, verifyPin, validateNisn, validatePin } from './security';
 import {
+  DEFAULT_EPOCH_ID,
   calculateServerClockOffset,
   computeAppTimeMs,
   computeOffsetForTargetAppTime,
+  isResetEpochId,
+  isUninitializedDefaultSnapshot,
   shouldApplyRemoteSnapshot,
 } from './realtimeSync';
+import { loadSnapshotFromIndexedDb, saveSnapshotToIndexedDb } from './indexedDbStore';
+import {
+  computePeriodStats,
+  computePeriodTabulation,
+  UnifiedPeriodStats,
+} from './tabulation';
+import { applyAuthoritativeStateUpdate } from './stateMerge';
 
 const STORAGE_KEY_PREFIX = 'epilketos_state_smp_v2';
 const BROADCAST_CHANNEL_NAME = 'epilketos_realtime_sync_v2';
@@ -52,12 +63,14 @@ export class ElectionStore {
   private committee: CommitteeMember[];
   private auditLogs: AuditLog[];
   private accounts: UserAccount[];
+  private tombstones: DeletedEntityTombstones = {};
   private activeSession: AuthSession | null = null;
   private listeners: Set<() => void> = new Set();
 
   // Real-time synchronization & Unified Application Clock state
   private clientId: string = `client_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
   private revision: number = 1;
+  private epochId: string | undefined = DEFAULT_EPOCH_ID;
   private updatedAt: string = new Date().toISOString();
   private updatedBy: string = 'Sistem';
   private lastAction: string = 'INIT';
@@ -68,23 +81,35 @@ export class ElectionStore {
   private onlineClients: number = 1;
   private lastSyncedAt: string | null = null;
   private isApplyingRemoteState: boolean = false;
+  private hasPendingLocalSync: boolean = false;
+  private isHttpPushInFlight: boolean = false;
+  private latestLocalMutationRevision: number = 0;
+  private queuedPushQueue: Array<{ updatedBy: string; lastAction: string }> = [];
+  private wasExplicitlyResetByServer: boolean = false;
+  private pendingForceResync: boolean = false;
 
   private ws: WebSocket | null = null;
   private broadcastChannel: BroadcastChannel | null = null;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private pollTimer: ReturnType<typeof setInterval> | null = null;
+  private lastRestorePushAtMs: number = 0;
+
+  private static cloneData<T>(data: T): T {
+    return JSON.parse(JSON.stringify(data)) as T;
+  }
 
   constructor() {
-    this.school = INITIAL_SCHOOL;
-    this.periods = INITIAL_PERIODS;
-    this.candidates = INITIAL_CANDIDATES;
-    this.voters = INITIAL_VOTERS;
-    this.votes = INITIAL_VOTES;
-    this.committee = INITIAL_COMMITTEE;
-    this.auditLogs = INITIAL_AUDIT_LOGS;
-    this.accounts = INITIAL_ACCOUNTS;
+    this.school = ElectionStore.cloneData(INITIAL_SCHOOL);
+    this.periods = ElectionStore.cloneData(INITIAL_PERIODS);
+    this.candidates = ElectionStore.cloneData(INITIAL_CANDIDATES);
+    this.voters = ElectionStore.cloneData(INITIAL_VOTERS);
+    this.votes = ElectionStore.cloneData(INITIAL_VOTES);
+    this.committee = ElectionStore.cloneData(INITIAL_COMMITTEE);
+    this.auditLogs = ElectionStore.cloneData(INITIAL_AUDIT_LOGS);
+    this.accounts = ElectionStore.cloneData(INITIAL_ACCOUNTS);
 
     this.loadFromStorage();
+    void this.hydrateFromIndexedDb();
     this.initRealtimeSync();
   }
 
@@ -101,9 +126,11 @@ export class ElectionStore {
   private notify(updatedBy: string = 'Admin Sekolah', lastAction: string = 'UPDATE_DATA') {
     if (!this.isApplyingRemoteState) {
       this.revision += 1;
+      this.latestLocalMutationRevision = this.revision;
       this.updatedAt = new Date(this.getAppTimeMs()).toISOString();
       this.updatedBy = updatedBy;
       this.lastAction = lastAction;
+      this.hasPendingLocalSync = true;
       this.saveToStorage();
       this.pushStateToRemote(updatedBy, lastAction);
     } else {
@@ -133,6 +160,7 @@ export class ElectionStore {
   public getSnapshot(): ElectionStateSnapshot {
     return {
       revision: this.revision,
+      epochId: this.epochId,
       updatedAt: this.updatedAt,
       updatedBy: this.updatedBy,
       lastAction: this.lastAction,
@@ -145,6 +173,7 @@ export class ElectionStore {
       committee: this.committee,
       auditLogs: this.auditLogs,
       accounts: this.accounts,
+      tombstones: this.tombstones,
     };
   }
 
@@ -162,43 +191,237 @@ export class ElectionStore {
       this.onlineClients = onlineClients;
     }
 
+    const remoteMeta = {
+      revision: snapshot.revision ?? 0,
+      updatedAt: snapshot.updatedAt || '',
+      epochId: snapshot.epochId,
+      lastAction: snapshot.lastAction,
+    };
+    const isRemoteUninitialized = isUninitializedDefaultSnapshot(remoteMeta);
+    const isExplicitReset = isResetEpochId(snapshot.epochId) && snapshot.epochId !== this.epochId;
+
     const shouldApply = shouldApplyRemoteSnapshot(
-      { revision: this.revision, updatedAt: this.updatedAt },
-      { revision: snapshot.revision ?? 0, updatedAt: snapshot.updatedAt || '' },
-      forceSync
+      { revision: this.revision, updatedAt: this.updatedAt, epochId: this.epochId, lastAction: this.lastAction },
+      remoteMeta,
+      forceSync || isExplicitReset
     );
 
+    // If local has unpushed mutations (e.g., newly created period, DPT, candidate, or committee) and a concurrent
+    // remote update arrived before our push ACK returned, merge both non-destructively instead of overwriting local edits!
+    if (this.hasPendingLocalSync && !isExplicitReset && !isRemoteUninitialized) {
+      const merged = applyAuthoritativeStateUpdate({
+        current: snapshot,
+        incoming: this.getSnapshot(),
+        updatedBy: this.updatedBy || 'Admin Sekolah',
+        lastAction: this.lastAction || 'SYNC_UPDATE',
+        defaultAccounts: INITIAL_ACCOUNTS,
+      });
+
+      this.isApplyingRemoteState = true;
+      try {
+        this.revision = merged.revision;
+        if (merged.epochId) this.epochId = merged.epochId;
+        this.updatedAt = merged.updatedAt;
+        this.updatedBy = merged.updatedBy;
+        this.lastAction = merged.lastAction;
+        this.appTimeOffsetMs = merged.appTimeOffsetMs;
+        this.school = merged.school;
+        this.periods = merged.periods;
+        this.candidates = merged.candidates;
+        this.voters = merged.voters;
+        this.votes = merged.votes;
+        this.committee = merged.committee;
+        this.auditLogs = merged.auditLogs;
+        this.accounts = merged.accounts ?? this.accounts;
+        this.tombstones = merged.tombstones || {};
+        this.lastSyncedAt = new Date(this.getAppTimeMs()).toISOString();
+        this.saveToStorage();
+      } finally {
+        this.isApplyingRemoteState = false;
+      }
+
+      this.emitToListeners();
+      if (!this.isHttpPushInFlight && this.queuedPushQueue.length === 0) {
+        this.pushStateToRemote(this.updatedBy || 'Admin Sekolah', this.lastAction || 'RESTORE_CLIENT_STATE');
+      }
+      return;
+    }
+
     if (!shouldApply) {
-      // Still update appTimeOffsetMs if provided and emit metadata update
-      if (typeof snapshot.appTimeOffsetMs === 'number' && snapshot.appTimeOffsetMs !== this.appTimeOffsetMs) {
+      const now = Date.now();
+      const localHasEdits =
+        this.revision > 1 ||
+        (this.lastAction !== 'INIT' && this.lastAction !== 'INIT_SYSTEM' && this.lastAction !== 'LOAD_DISK');
+      if (
+        (isRemoteUninitialized || (snapshot.revision ?? 0) < this.revision || this.hasPendingLocalSync) &&
+        localHasEdits &&
+        !isResetEpochId(snapshot.epochId) &&
+        now - this.lastRestorePushAtMs > 2500
+      ) {
+        this.lastRestorePushAtMs = now;
+        this.pushStateToRemote(this.updatedBy || 'Admin Sekolah', 'RESTORE_CLIENT_STATE');
+      } else if (typeof snapshot.appTimeOffsetMs === 'number' && snapshot.appTimeOffsetMs !== this.appTimeOffsetMs) {
         this.appTimeOffsetMs = snapshot.appTimeOffsetMs;
         this.emitToListeners();
       }
       return;
     }
 
+    if (isExplicitReset) {
+      this.wasExplicitlyResetByServer = true;
+    }
+
     this.isApplyingRemoteState = true;
     try {
       this.revision = snapshot.revision ?? this.revision;
+      if (snapshot.epochId) this.epochId = snapshot.epochId;
       this.updatedAt = snapshot.updatedAt || new Date(this.getAppTimeMs()).toISOString();
       this.updatedBy = snapshot.updatedBy || 'Admin Sekolah';
       this.lastAction = snapshot.lastAction || 'REALTIME_SYNC';
+      this.hasPendingLocalSync = false;
       if (typeof snapshot.appTimeOffsetMs === 'number') {
         this.appTimeOffsetMs = snapshot.appTimeOffsetMs;
       }
       if (snapshot.school) this.school = snapshot.school;
-      if (Array.isArray(snapshot.periods)) this.periods = snapshot.periods;
+      if (Array.isArray(snapshot.periods) && snapshot.periods.length > 0) {
+        this.periods = snapshot.periods;
+      }
       if (Array.isArray(snapshot.candidates)) this.candidates = snapshot.candidates;
       if (Array.isArray(snapshot.voters)) this.voters = snapshot.voters;
       if (Array.isArray(snapshot.votes)) this.votes = snapshot.votes;
       if (Array.isArray(snapshot.committee)) this.committee = snapshot.committee;
       if (Array.isArray(snapshot.auditLogs)) this.auditLogs = snapshot.auditLogs;
       if (Array.isArray(snapshot.accounts)) this.accounts = snapshot.accounts;
+      this.tombstones = snapshot.tombstones || {};
 
       this.lastSyncedAt = new Date(this.getAppTimeMs()).toISOString();
       this.saveToStorage();
     } finally {
       this.isApplyingRemoteState = false;
+    }
+
+    this.emitToListeners();
+  }
+
+  /**
+   * Applies an atomic lightweight VOTE_CAST delta received from the authoritative server
+   * via HTTP /api/vote response or WebSocket broadcast without re-transferring heavy base64 media.
+   */
+  private applyServerVoteDelta(payload: {
+    vote?: AnonymousVote;
+    voterUpdate?: { id: string; hasVoted: boolean; votedAt: string };
+    auditLog?: AuditLog;
+    revision?: number;
+    epochId?: string;
+    updatedAt?: string;
+    updatedBy?: string;
+    lastAction?: string;
+    appTimeOffsetMs?: number;
+    serverTimeMs?: number;
+    onlineClients?: number;
+  }) {
+    if (typeof payload.serverTimeMs === 'number' && Number.isFinite(payload.serverTimeMs)) {
+      this.serverClockOffsetMs = calculateServerClockOffset(payload.serverTimeMs, Date.now());
+    }
+    if (typeof payload.onlineClients === 'number' && payload.onlineClients >= 1) {
+      this.onlineClients = payload.onlineClients;
+    }
+    if (typeof payload.appTimeOffsetMs === 'number') {
+      this.appTimeOffsetMs = payload.appTimeOffsetMs;
+    }
+
+    this.isApplyingRemoteState = true;
+    try {
+      if (payload.vote && !this.votes.some((v) => v.id === payload.vote!.id)) {
+        this.votes = [...this.votes, payload.vote];
+      }
+      if (payload.voterUpdate) {
+        const { id, hasVoted, votedAt } = payload.voterUpdate;
+        this.voters = this.voters.map((v) =>
+          v.id === id ? { ...v, hasVoted, votedAt, pinPlain: undefined } : v
+        );
+      }
+      if (payload.auditLog && !this.auditLogs.some((l) => l.id === payload.auditLog!.id)) {
+        this.auditLogs = [payload.auditLog, ...this.auditLogs].slice(0, 200);
+      }
+
+      const expectedNext = this.revision + 1;
+      if (typeof payload.revision === 'number') {
+        if (payload.revision <= expectedNext) {
+          this.revision = Math.max(this.revision, payload.revision);
+        } else {
+          // Missed intermediate revision(s): do not pre-bump revision so forced catch-up snapshot applies cleanly
+          void this.fetchStateFromHttp(true);
+        }
+      }
+      if (payload.epochId) this.epochId = payload.epochId;
+      if (payload.updatedAt) this.updatedAt = payload.updatedAt;
+      if (payload.updatedBy) this.updatedBy = payload.updatedBy;
+      if (payload.lastAction) this.lastAction = payload.lastAction;
+
+      this.lastSyncedAt = new Date(this.getAppTimeMs()).toISOString();
+      this.saveToStorage();
+    } finally {
+      this.isApplyingRemoteState = false;
+    }
+
+    this.emitToListeners();
+  }
+
+  /**
+   * Reconciles the local store with the server's merged authoritative snapshot returned as an ACK
+   * to our own mutation. Preserves concurrent updates (e.g., live votes, other device edits) merged by server.
+   */
+  private applyAuthoritativeAckSnapshot(
+    serverState: ElectionStateSnapshot,
+    serverTimeMs?: number,
+    onlineClients?: number,
+    ackForRevision?: number
+  ) {
+    if (typeof serverTimeMs === 'number' && Number.isFinite(serverTimeMs)) {
+      this.serverClockOffsetMs = calculateServerClockOffset(serverTimeMs, Date.now());
+    }
+    if (typeof onlineClients === 'number' && onlineClients >= 1) {
+      this.onlineClients = onlineClients;
+    }
+
+    const noNewerLocalMutation =
+      this.queuedPushQueue.length === 0 &&
+      (typeof ackForRevision !== 'number' || this.latestLocalMutationRevision <= ackForRevision);
+
+    // Only adopt full merged collections if no newer local mutation occurred while this ACK was in flight
+    if (noNewerLocalMutation && (serverState.revision ?? 0) >= this.revision) {
+      this.isApplyingRemoteState = true;
+      try {
+        this.revision = Math.max(this.revision, serverState.revision ?? this.revision);
+        if (serverState.epochId) this.epochId = serverState.epochId;
+        if (serverState.updatedAt) this.updatedAt = serverState.updatedAt;
+        if (serverState.updatedBy) this.updatedBy = serverState.updatedBy;
+        if (serverState.lastAction) this.lastAction = serverState.lastAction;
+        this.hasPendingLocalSync = false;
+        if (typeof serverState.appTimeOffsetMs === 'number') {
+          this.appTimeOffsetMs = serverState.appTimeOffsetMs;
+        }
+        if (serverState.school) this.school = serverState.school;
+        if (Array.isArray(serverState.periods) && serverState.periods.length > 0) {
+          this.periods = serverState.periods;
+        }
+        if (Array.isArray(serverState.candidates)) this.candidates = serverState.candidates;
+        if (Array.isArray(serverState.voters)) this.voters = serverState.voters;
+        if (Array.isArray(serverState.votes)) this.votes = serverState.votes;
+        if (Array.isArray(serverState.committee)) this.committee = serverState.committee;
+        if (Array.isArray(serverState.auditLogs)) this.auditLogs = serverState.auditLogs;
+        if (Array.isArray(serverState.accounts)) this.accounts = serverState.accounts;
+        this.tombstones = serverState.tombstones || {};
+        this.lastSyncedAt = new Date(this.getAppTimeMs()).toISOString();
+        this.saveToStorage();
+      } finally {
+        this.isApplyingRemoteState = false;
+      }
+    } else if (noNewerLocalMutation) {
+      this.hasPendingLocalSync = false;
+      this.lastSyncedAt = new Date(this.getAppTimeMs()).toISOString();
+      this.saveToStorage();
     }
 
     this.emitToListeners();
@@ -282,8 +505,12 @@ export class ElectionStore {
   public async forceResyncWithServer(): Promise<void> {
     if (typeof window === 'undefined') return;
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-      this.ws.send(JSON.stringify({ type: 'REQUEST_STATE', clientSentAtMs: Date.now() }));
-      return;
+      this.pendingForceResync = true;
+      try {
+        this.ws.send(JSON.stringify({ type: 'REQUEST_STATE', clientSentAtMs: Date.now() }));
+      } catch {
+        // Fallback handled immediately below
+      }
     }
     await this.fetchStateFromHttp(true);
   }
@@ -299,7 +526,7 @@ export class ElectionStore {
           const data = event.data;
           if (!data || data.senderId === this.clientId) return;
           if (data.type === 'STATE_UPDATED' && data.state) {
-            this.applyRemoteSnapshot(data.state, data.serverTimeMs, data.onlineClients, true);
+            this.applyRemoteSnapshot(data.state, data.serverTimeMs, data.onlineClients, false);
           }
         };
       } catch {
@@ -312,7 +539,7 @@ export class ElectionStore {
       if (event.key === `${STORAGE_KEY_PREFIX}_snapshot` && event.newValue) {
         try {
           const parsed = JSON.parse(event.newValue) as ElectionStateSnapshot;
-          this.applyRemoteSnapshot(parsed, undefined, undefined, true);
+          this.applyRemoteSnapshot(parsed, undefined, undefined, false);
         } catch {
           // Ignore
         }
@@ -320,7 +547,7 @@ export class ElectionStore {
     });
 
     // 3. Connect to Authoritative Server via WebSocket (/ws) + HTTP initial fetch
-    this.fetchStateFromHttp(true);
+    this.fetchStateFromHttp(false);
     this.connectWebSocket();
 
     // 4. Ultra-responsive Dual-Engine Synchronization Loop (every 1.2s)
@@ -351,6 +578,27 @@ export class ElectionStore {
     });
     window.addEventListener('online', onWakeOrFocus);
     window.addEventListener('focus', onWakeOrFocus);
+
+    // 6. Flush any pending unpushed mutations (e.g., newly created period) immediately before page unload/refresh
+    const flushOnUnload = () => {
+      this.saveToStorage();
+      if (this.hasPendingLocalSync && typeof navigator !== 'undefined' && typeof navigator.sendBeacon === 'function') {
+        try {
+          const compact = this.buildPushSnapshot(this.lastAction || 'SYNC_UPDATE');
+          const payload = JSON.stringify({
+            state: compact,
+            updatedBy: this.updatedBy || 'Admin Sekolah',
+            lastAction: this.lastAction || 'SYNC_UPDATE',
+            senderId: this.clientId,
+          });
+          if (payload.length < 60000) {
+            navigator.sendBeacon('/api/state', new Blob([payload], { type: 'application/json' }));
+          }
+        } catch {}
+      }
+    };
+    window.addEventListener('pagehide', flushOnUnload);
+    window.addEventListener('beforeunload', flushOnUnload);
   }
 
   private connectWebSocket() {
@@ -384,7 +632,16 @@ export class ElectionStore {
           if (msg.type === 'INIT_STATE' && msg.state) {
             this.isConnected = true;
             this.transport = 'websocket';
-            this.applyRemoteSnapshot(msg.state, msg.serverTimeMs, msg.onlineClients, true);
+            const forceApply = this.pendingForceResync;
+            this.pendingForceResync = false;
+            this.applyRemoteSnapshot(msg.state, msg.serverTimeMs, msg.onlineClients, forceApply);
+            return;
+          }
+
+          if (msg.type === 'VOTE_CAST') {
+            this.isConnected = true;
+            this.transport = 'websocket';
+            this.applyServerVoteDelta(msg);
             return;
           }
 
@@ -392,21 +649,12 @@ export class ElectionStore {
             this.isConnected = true;
             this.transport = 'websocket';
             if (msg.senderId === this.clientId) {
-              // Update revision & server clock from authoritative ACK
-              if (typeof msg.serverTimeMs === 'number') {
-                this.serverClockOffsetMs = calculateServerClockOffset(msg.serverTimeMs, Date.now());
+              if (!this.isHttpPushInFlight && this.queuedPushQueue.length === 0) {
+                this.applyAuthoritativeAckSnapshot(msg.state, msg.serverTimeMs, msg.onlineClients);
               }
-              if (typeof msg.onlineClients === 'number') {
-                this.onlineClients = msg.onlineClients;
-              }
-              if (msg.state.revision > this.revision) {
-                this.revision = msg.state.revision;
-              }
-              this.lastSyncedAt = new Date(this.getAppTimeMs()).toISOString();
-              this.emitToListeners();
               return;
             }
-            this.applyRemoteSnapshot(msg.state, msg.serverTimeMs, msg.onlineClients, true);
+            this.applyRemoteSnapshot(msg.state, msg.serverTimeMs, msg.onlineClients, false);
             return;
           }
 
@@ -478,9 +726,32 @@ export class ElectionStore {
       if (typeof data.appTimeOffsetMs === 'number' && data.appTimeOffsetMs !== this.appTimeOffsetMs) {
         this.appTimeOffsetMs = data.appTimeOffsetMs;
       }
-      if (typeof data.revision === 'number' && data.revision !== this.revision) {
-        // Server has a different revision than us, immediately fetch full authoritative snapshot!
+      const remoteUninitialized = isUninitializedDefaultSnapshot({
+        revision: typeof data.revision === 'number' ? data.revision : 1,
+        lastAction: data.lastAction,
+      });
+
+      if (isResetEpochId(data.epochId) && data.epochId !== this.epochId) {
         await this.fetchStateFromHttp(true);
+      } else if (this.hasPendingLocalSync && !this.isHttpPushInFlight && this.queuedPushQueue.length === 0) {
+        this.pushStateToRemote(this.updatedBy || 'Admin Sekolah', this.lastAction || 'RESTORE_CLIENT_STATE');
+      } else if (typeof data.revision === 'number' && data.revision > this.revision) {
+        // Server has a newer revision than us, immediately fetch full authoritative snapshot!
+        await this.fetchStateFromHttp(false);
+      } else if (
+        typeof data.revision === 'number' &&
+        (data.revision < this.revision || this.hasPendingLocalSync)
+      ) {
+        const localHasEdits =
+          this.revision > 1 ||
+          (this.lastAction !== 'INIT' && this.lastAction !== 'INIT_SYSTEM' && this.lastAction !== 'LOAD_DISK');
+        if (localHasEdits && !this.isHttpPushInFlight) {
+          const now = Date.now();
+          if (now - this.lastRestorePushAtMs > 2500) {
+            this.lastRestorePushAtMs = now;
+            this.pushStateToRemote(this.updatedBy || 'Admin Sekolah', 'RESTORE_CLIENT_STATE');
+          }
+        }
       } else {
         this.isConnected = true;
         this.lastSyncedAt = new Date(this.getAppTimeMs()).toISOString();
@@ -545,165 +816,310 @@ export class ElectionStore {
       }
     }
 
-    // 2. Push to authoritative server over WebSocket or HTTP POST
-    let wsSent = false;
-    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-      try {
-        this.ws.send(
-          JSON.stringify({
-            type: 'PUSH_STATE',
-            state: snapshot,
-            updatedBy,
-            lastAction,
-            senderId: this.clientId,
-          })
-        );
-        wsSent = true;
-      } catch {
-        wsSent = false;
-      }
+    // 2. Push to authoritative server reliably via ordered queue (preserves distinct critical actions)
+    const lastQueued = this.queuedPushQueue[this.queuedPushQueue.length - 1];
+    if (!lastQueued || lastQueued.lastAction !== lastAction || lastQueued.updatedBy !== updatedBy) {
+      this.queuedPushQueue.push({ updatedBy, lastAction });
     }
-
-    if (!wsSent) {
-      this.postStateViaHttp(snapshot, updatedBy, lastAction);
-    } else {
-      // Safety timeout: if server WebSocket doesn't ACK the revision within 1500ms, push via HTTP
-      const expectedRevision = snapshot.revision;
-      setTimeout(() => {
-        if (this.revision <= expectedRevision) {
-          this.postStateViaHttp(snapshot, updatedBy, lastAction);
-        }
-      }, 1500);
-    }
+    void this.flushPushQueue();
   }
 
-  private postStateViaHttp(snapshot: ElectionStateSnapshot, updatedBy: string, lastAction: string) {
+  private buildPushSnapshot(lastAction: string): ElectionStateSnapshot {
+    const snapshot = this.getSnapshot();
+    const mutatesSchool =
+      lastAction === 'UPDATE_KONFIGURASI_SEKOLAH' ||
+      lastAction === 'RESET_DATA_DEMO' ||
+      lastAction === 'RESTORE_CLIENT_STATE';
+
+    if (mutatesSchool) {
+      return snapshot;
+    }
+
+    // For period/voter/candidate/committee mutations, strip heavy base64 media from `school`
+    // because authoritative merge preserves existing server school config unchanged.
+    return {
+      ...snapshot,
+      school: {
+        ...snapshot.school,
+        openingVideoUrl: snapshot.school.openingVideoUrl?.startsWith('data:') ? '' : snapshot.school.openingVideoUrl,
+        logoUrl: (snapshot.school.logoUrl?.length || 0) > 50000 ? '' : snapshot.school.logoUrl,
+        osisLogoUrl: (snapshot.school.osisLogoUrl?.length || 0) > 50000 ? '' : snapshot.school.osisLogoUrl,
+      },
+    };
+  }
+
+  private async flushPushQueue(): Promise<void> {
     if (typeof window === 'undefined' || typeof fetch === 'undefined') return;
-    fetch('/api/state', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
+    if (this.isHttpPushInFlight) return;
+
+    while (this.queuedPushQueue.length > 0) {
+      const { updatedBy, lastAction } = this.queuedPushQueue.shift()!;
+
+      const snapshot = this.buildPushSnapshot(lastAction);
+      const sentRevision = snapshot.revision;
+      const bodyStr = JSON.stringify({
         state: snapshot,
         updatedBy,
         lastAction,
         senderId: this.clientId,
-      }),
-    })
-      .then((res) => (res.ok ? res.json() : null))
-      .then((data) => {
+      });
+
+      this.isHttpPushInFlight = true;
+      try {
+        const res = await fetch('/api/state', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: bodyStr,
+          // keepalive ensures critical period/data saves finish even if the user reloads right away (up to 64KB browser limit)
+          keepalive: bodyStr.length < 60000,
+        });
+        const data = res.ok ? await res.json() : null;
         if (data && data.state) {
           this.isConnected = true;
-          if (typeof data.serverTimeMs === 'number') {
-            this.serverClockOffsetMs = calculateServerClockOffset(data.serverTimeMs, Date.now());
-          }
-          if (typeof data.onlineClients === 'number') {
-            this.onlineClients = data.onlineClients;
-          }
-          this.revision = data.state.revision ?? this.revision;
-          this.lastSyncedAt = new Date(this.getAppTimeMs()).toISOString();
-          this.emitToListeners();
+          this.applyAuthoritativeAckSnapshot(
+            data.state,
+            data.serverTimeMs,
+            data.onlineClients,
+            sentRevision
+          );
         }
-      })
-      .catch(() => {});
+      } catch {
+        // Keep hasPendingLocalSync = true so pollTimer / reconnect retries automatically
+      } finally {
+        this.isHttpPushInFlight = false;
+      }
+    }
+  }
+
+  private safeParseJson<T>(raw: string | null): T | null {
+    if (!raw) return null;
+    try {
+      return JSON.parse(raw) as T;
+    } catch {
+      return null;
+    }
   }
 
   private loadFromStorage() {
     if (typeof window === 'undefined') return;
+    const savedSchool = this.safeParseJson<SchoolConfig>(localStorage.getItem(`${STORAGE_KEY_PREFIX}_school`));
+    if (savedSchool) {
+      this.school = {
+        ...INITIAL_SCHOOL,
+        ...savedSchool,
+        name: typeof savedSchool.name === 'string' && savedSchool.name.trim() !== '' ? savedSchool.name : INITIAL_SCHOOL.name,
+        type: savedSchool.type === 'OSIS' || savedSchool.type === 'OSIM' ? savedSchool.type : INITIAL_SCHOOL.type,
+        openingVideoEnabled: savedSchool.openingVideoEnabled !== false,
+      };
+    }
+
+    const savedPeriods = this.safeParseJson<ElectionPeriod[]>(localStorage.getItem(`${STORAGE_KEY_PREFIX}_periods`));
+    if (Array.isArray(savedPeriods) && savedPeriods.length > 0) {
+      this.periods = savedPeriods;
+    }
+
+    const savedCandidates = this.safeParseJson<Candidate[]>(localStorage.getItem(`${STORAGE_KEY_PREFIX}_candidates`));
+    if (Array.isArray(savedCandidates)) this.candidates = savedCandidates;
+
+    const savedVoters = this.safeParseJson<Voter[]>(localStorage.getItem(`${STORAGE_KEY_PREFIX}_voters`));
+    if (Array.isArray(savedVoters)) this.voters = savedVoters;
+
+    const savedVotes = this.safeParseJson<AnonymousVote[]>(localStorage.getItem(`${STORAGE_KEY_PREFIX}_votes`));
+    if (Array.isArray(savedVotes)) this.votes = savedVotes;
+
+    const savedCommittee = this.safeParseJson<CommitteeMember[]>(localStorage.getItem(`${STORAGE_KEY_PREFIX}_committee`));
+    if (Array.isArray(savedCommittee)) this.committee = savedCommittee;
+
+    const savedLogs = this.safeParseJson<AuditLog[]>(localStorage.getItem(`${STORAGE_KEY_PREFIX}_logs`));
+    if (Array.isArray(savedLogs)) this.auditLogs = savedLogs;
+
+    const savedAccounts = this.safeParseJson<UserAccount[]>(localStorage.getItem(`${STORAGE_KEY_PREFIX}_accounts`));
+    if (Array.isArray(savedAccounts)) this.accounts = savedAccounts;
+
+    const meta = this.safeParseJson<Record<string, unknown>>(localStorage.getItem(`${STORAGE_KEY_PREFIX}_meta`));
+    if (meta) {
+      if (typeof meta.revision === 'number') this.revision = meta.revision;
+      if (typeof meta.epochId === 'string' && meta.epochId) this.epochId = meta.epochId;
+      if (typeof meta.appTimeOffsetMs === 'number') this.appTimeOffsetMs = meta.appTimeOffsetMs;
+      if (typeof meta.updatedAt === 'string' && meta.updatedAt) this.updatedAt = meta.updatedAt;
+      if (typeof meta.updatedBy === 'string' && meta.updatedBy) this.updatedBy = meta.updatedBy;
+      if (typeof meta.lastAction === 'string' && meta.lastAction) this.lastAction = meta.lastAction;
+      if (typeof meta.hasPendingLocalSync === 'boolean') this.hasPendingLocalSync = meta.hasPendingLocalSync;
+      if (meta.tombstones && typeof meta.tombstones === 'object') {
+        this.tombstones = meta.tombstones as DeletedEntityTombstones;
+      }
+    }
+
+    // Restore active session if present
     try {
-      const savedSchool = localStorage.getItem(`${STORAGE_KEY_PREFIX}_school`);
-      const savedPeriods = localStorage.getItem(`${STORAGE_KEY_PREFIX}_periods`);
-      const savedCandidates = localStorage.getItem(`${STORAGE_KEY_PREFIX}_candidates`);
-      const savedVoters = localStorage.getItem(`${STORAGE_KEY_PREFIX}_voters`);
-      const savedVotes = localStorage.getItem(`${STORAGE_KEY_PREFIX}_votes`);
-      const savedCommittee = localStorage.getItem(`${STORAGE_KEY_PREFIX}_committee`);
-      const savedLogs = localStorage.getItem(`${STORAGE_KEY_PREFIX}_logs`);
-      const savedAccounts = localStorage.getItem(`${STORAGE_KEY_PREFIX}_accounts`);
-      const savedMeta = localStorage.getItem(`${STORAGE_KEY_PREFIX}_meta`);
-
-      if (savedSchool) {
-        try {
-          const parsedSchool = JSON.parse(savedSchool);
-          const isDefaultPlaceholder = !parsedSchool.name || parsedSchool.name.trim() === '' || parsedSchool.name === 'SMP Negeri 1 Teladan Jakarta';
-          this.school = {
-            ...INITIAL_SCHOOL,
-            ...parsedSchool,
-            name: isDefaultPlaceholder ? INITIAL_SCHOOL.name : parsedSchool.name,
-            type: parsedSchool.type && parsedSchool.type.trim() !== '' ? parsedSchool.type : INITIAL_SCHOOL.type,
-            npsn: parsedSchool.npsn && parsedSchool.npsn.trim() !== '' ? parsedSchool.npsn : INITIAL_SCHOOL.npsn,
-            address: parsedSchool.address && parsedSchool.address.trim() !== '' ? parsedSchool.address : INITIAL_SCHOOL.address,
-            city: parsedSchool.city && parsedSchool.city.trim() !== '' ? parsedSchool.city : INITIAL_SCHOOL.city,
-            province: parsedSchool.province && parsedSchool.province.trim() !== '' ? parsedSchool.province : INITIAL_SCHOOL.province,
-            principalName: parsedSchool.principalName && parsedSchool.principalName.trim() !== '' ? parsedSchool.principalName : INITIAL_SCHOOL.principalName,
-          };
-        } catch {
-          this.school = INITIAL_SCHOOL;
-        }
-      }
-      if (savedPeriods) this.periods = JSON.parse(savedPeriods);
-      if (savedCandidates) this.candidates = JSON.parse(savedCandidates);
-      if (savedVoters) this.voters = JSON.parse(savedVoters);
-      if (savedVotes) this.votes = JSON.parse(savedVotes);
-      if (savedCommittee) this.committee = JSON.parse(savedCommittee);
-      if (savedLogs) this.auditLogs = JSON.parse(savedLogs);
-      if (savedAccounts) this.accounts = JSON.parse(savedAccounts);
-      if (savedMeta) {
-        const meta = JSON.parse(savedMeta);
-        if (typeof meta.revision === 'number') this.revision = meta.revision;
-        if (typeof meta.appTimeOffsetMs === 'number') this.appTimeOffsetMs = meta.appTimeOffsetMs;
-        if (meta.updatedAt) this.updatedAt = meta.updatedAt;
-      }
-
-      // Restore active session if present
-      const savedSession = sessionStorage.getItem(`${STORAGE_KEY_PREFIX}_session`) || localStorage.getItem(`${STORAGE_KEY_PREFIX}_session`);
+      const savedSession =
+        sessionStorage.getItem(`${STORAGE_KEY_PREFIX}_session`) || localStorage.getItem(`${STORAGE_KEY_PREFIX}_session`);
       if (savedSession) {
-        try {
-          this.activeSession = JSON.parse(savedSession);
-        } catch {
-          this.activeSession = null;
-        }
+        this.activeSession = JSON.parse(savedSession);
       }
     } catch {
-      // Ignore parse errors and fallback to initial
+      this.activeSession = null;
     }
   }
 
-  private saveToStorage() {
+  private async hydrateFromIndexedDb() {
     if (typeof window === 'undefined') return;
+    const idbSnapshot = await loadSnapshotFromIndexedDb();
+    if (!idbSnapshot || this.wasExplicitlyResetByServer) return;
+
+    const isFreshBootWithoutStorage = this.revision <= 1 && this.lastAction === 'INIT';
+    const idbIsStrictlyNewer = idbSnapshot.revision > this.revision || (isFreshBootWithoutStorage && idbSnapshot.revision >= 1);
+    const idbMatchesSameMutationForMediaOnly =
+      !idbIsStrictlyNewer &&
+      idbSnapshot.revision === this.revision &&
+      Boolean(idbSnapshot.updatedAt) &&
+      idbSnapshot.updatedAt === this.updatedAt;
+
+    if (!idbIsStrictlyNewer && !idbMatchesSameMutationForMediaOnly) return;
+
+    this.isApplyingRemoteState = true;
     try {
-      localStorage.setItem(`${STORAGE_KEY_PREFIX}_school`, JSON.stringify(this.school));
-      localStorage.setItem(`${STORAGE_KEY_PREFIX}_periods`, JSON.stringify(this.periods));
-      localStorage.setItem(`${STORAGE_KEY_PREFIX}_candidates`, JSON.stringify(this.candidates));
-      localStorage.setItem(`${STORAGE_KEY_PREFIX}_voters`, JSON.stringify(this.voters));
-      localStorage.setItem(`${STORAGE_KEY_PREFIX}_votes`, JSON.stringify(this.votes));
-      localStorage.setItem(`${STORAGE_KEY_PREFIX}_committee`, JSON.stringify(this.committee));
-      localStorage.setItem(`${STORAGE_KEY_PREFIX}_logs`, JSON.stringify(this.auditLogs));
-      localStorage.setItem(`${STORAGE_KEY_PREFIX}_accounts`, JSON.stringify(this.accounts));
-      localStorage.setItem(
-        `${STORAGE_KEY_PREFIX}_meta`,
-        JSON.stringify({
-          revision: this.revision,
-          updatedAt: this.updatedAt,
-          updatedBy: this.updatedBy,
-          lastAction: this.lastAction,
-          appTimeOffsetMs: this.appTimeOffsetMs,
-        })
-      );
-      localStorage.setItem(`${STORAGE_KEY_PREFIX}_snapshot`, JSON.stringify(this.getSnapshot()));
+      if (idbIsStrictlyNewer) {
+        this.revision = idbSnapshot.revision;
+        if (idbSnapshot.epochId) this.epochId = idbSnapshot.epochId;
+        if (idbSnapshot.updatedAt) this.updatedAt = idbSnapshot.updatedAt;
+        if (idbSnapshot.updatedBy) this.updatedBy = idbSnapshot.updatedBy;
+        if (idbSnapshot.lastAction) this.lastAction = idbSnapshot.lastAction;
+        if (typeof idbSnapshot.appTimeOffsetMs === 'number') this.appTimeOffsetMs = idbSnapshot.appTimeOffsetMs;
+        if (idbSnapshot.school) this.school = idbSnapshot.school;
+        if (Array.isArray(idbSnapshot.periods) && idbSnapshot.periods.length > 0) this.periods = idbSnapshot.periods;
+        if (Array.isArray(idbSnapshot.candidates)) this.candidates = idbSnapshot.candidates;
+        if (Array.isArray(idbSnapshot.voters)) this.voters = idbSnapshot.voters;
+        if (Array.isArray(idbSnapshot.votes)) this.votes = idbSnapshot.votes;
+        if (Array.isArray(idbSnapshot.committee)) this.committee = idbSnapshot.committee;
+        if (Array.isArray(idbSnapshot.auditLogs)) this.auditLogs = idbSnapshot.auditLogs;
+        if (Array.isArray(idbSnapshot.accounts)) this.accounts = idbSnapshot.accounts;
+        if (idbSnapshot.tombstones) this.tombstones = idbSnapshot.tombstones;
+      } else if (idbMatchesSameMutationForMediaOnly) {
+        // Recover only heavy binary assets stripped by 5MB localStorage quota on same revision
+        if (idbSnapshot.school) {
+          this.school = {
+            ...this.school,
+            logoUrl: this.school.logoUrl || idbSnapshot.school.logoUrl || '',
+            osisLogoUrl: this.school.osisLogoUrl || idbSnapshot.school.osisLogoUrl || '',
+            openingVideoUrl: this.school.openingVideoUrl || idbSnapshot.school.openingVideoUrl || '',
+          };
+        }
+        if (Array.isArray(idbSnapshot.candidates)) {
+          const idbCandMap = new Map(idbSnapshot.candidates.map((c) => [c.id, c]));
+          this.candidates = this.candidates.map((c) => {
+            const full = idbCandMap.get(c.id);
+            if (!full) return c;
+            return {
+              ...c,
+              photoUrl: c.photoUrl || full.photoUrl || '',
+              chairmanPhotoUrl: c.chairmanPhotoUrl || full.chairmanPhotoUrl || '',
+              viceChairmanPhotoUrl: c.viceChairmanPhotoUrl || full.viceChairmanPhotoUrl || '',
+              videoUrl: c.videoUrl || full.videoUrl || '',
+            };
+          });
+        }
+      }
+      this.saveToStorage(false);
+    } finally {
+      this.isApplyingRemoteState = false;
+    }
+
+    this.emitToListeners();
+    void this.checkRevisionAndSync();
+  }
+
+  private safeSetStorage(key: string, value: string): boolean {
+    try {
+      localStorage.setItem(key, value);
+      return true;
     } catch {
-      // Storage quota or disabled
+      return false;
+    }
+  }
+
+  private saveToStorage(persistIndexedDb: boolean = true) {
+    if (typeof window === 'undefined') return;
+    // Save lightweight core state FIRST so 5MB localStorage quota on heavy base64 media never blocks saving periods or DPT
+    this.safeSetStorage(`${STORAGE_KEY_PREFIX}_periods`, JSON.stringify(this.periods));
+    this.safeSetStorage(`${STORAGE_KEY_PREFIX}_voters`, JSON.stringify(this.voters));
+    this.safeSetStorage(`${STORAGE_KEY_PREFIX}_votes`, JSON.stringify(this.votes));
+    this.safeSetStorage(`${STORAGE_KEY_PREFIX}_committee`, JSON.stringify(this.committee));
+    this.safeSetStorage(`${STORAGE_KEY_PREFIX}_accounts`, JSON.stringify(this.accounts));
+    this.safeSetStorage(
+      `${STORAGE_KEY_PREFIX}_meta`,
+      JSON.stringify({
+        revision: this.revision,
+        epochId: this.epochId,
+        updatedAt: this.updatedAt,
+        updatedBy: this.updatedBy,
+        lastAction: this.lastAction,
+        appTimeOffsetMs: this.appTimeOffsetMs,
+        hasPendingLocalSync: this.hasPendingLocalSync,
+        tombstones: this.tombstones,
+      })
+    );
+    this.safeSetStorage(`${STORAGE_KEY_PREFIX}_logs`, JSON.stringify(this.auditLogs.slice(0, 100)));
+
+    // Save school config with progressive quota fallbacks (full media stays in IndexedDB)
+    const fullSchoolSaved = this.safeSetStorage(`${STORAGE_KEY_PREFIX}_school`, JSON.stringify(this.school));
+    if (!fullSchoolSaved) {
+      const compactSchool: SchoolConfig = {
+        ...this.school,
+        openingVideoUrl: this.school.openingVideoUrl?.startsWith('data:') ? '' : this.school.openingVideoUrl,
+        logoUrl: (this.school.logoUrl?.length || 0) > 200000 ? '' : this.school.logoUrl,
+        osisLogoUrl: (this.school.osisLogoUrl?.length || 0) > 200000 ? '' : this.school.osisLogoUrl,
+      };
+      if (!this.safeSetStorage(`${STORAGE_KEY_PREFIX}_school`, JSON.stringify(compactSchool))) {
+        this.safeSetStorage(
+          `${STORAGE_KEY_PREFIX}_school`,
+          JSON.stringify({ ...compactSchool, logoUrl: '', osisLogoUrl: '', openingVideoUrl: '' })
+        );
+      }
+    }
+
+    // Save candidates with progressive quota fallbacks (full photos/videos stay in IndexedDB)
+    const fullCandidatesSaved = this.safeSetStorage(`${STORAGE_KEY_PREFIX}_candidates`, JSON.stringify(this.candidates));
+    if (!fullCandidatesSaved) {
+      const compactCandidates = this.candidates.map((c) => ({
+        ...c,
+        videoUrl: c.videoUrl?.startsWith('data:') ? '' : c.videoUrl,
+        photoUrl: (c.photoUrl?.length || 0) > 200000 ? '' : c.photoUrl,
+        chairmanPhotoUrl: (c.chairmanPhotoUrl?.length || 0) > 200000 ? '' : c.chairmanPhotoUrl,
+        viceChairmanPhotoUrl: (c.viceChairmanPhotoUrl?.length || 0) > 200000 ? '' : c.viceChairmanPhotoUrl,
+      }));
+      if (!this.safeSetStorage(`${STORAGE_KEY_PREFIX}_candidates`, JSON.stringify(compactCandidates))) {
+        const textOnlyCandidates = compactCandidates.map((c) => ({
+          ...c,
+          photoUrl: '',
+          chairmanPhotoUrl: '',
+          viceChairmanPhotoUrl: '',
+          videoUrl: '',
+        }));
+        this.safeSetStorage(`${STORAGE_KEY_PREFIX}_candidates`, JSON.stringify(textOnlyCandidates));
+      }
+    }
+
+    // Snapshot is an optional cross-tab cache; skip silently if oversized
+    this.safeSetStorage(`${STORAGE_KEY_PREFIX}_snapshot`, JSON.stringify(this.getSnapshot()));
+
+    // Persist full unmodified snapshot (with all photos/videos) to IndexedDB
+    if (persistIndexedDb) {
+      void saveSnapshotToIndexedDb(this.getSnapshot());
     }
   }
 
   // Reset to initial demo data
   public resetToSampleData() {
-    this.school = INITIAL_SCHOOL;
-    this.periods = INITIAL_PERIODS;
-    this.candidates = INITIAL_CANDIDATES;
-    this.voters = INITIAL_VOTERS;
-    this.votes = INITIAL_VOTES;
-    this.committee = INITIAL_COMMITTEE;
-    this.auditLogs = INITIAL_AUDIT_LOGS;
-    this.accounts = INITIAL_ACCOUNTS;
+    this.school = ElectionStore.cloneData(INITIAL_SCHOOL);
+    this.periods = ElectionStore.cloneData(INITIAL_PERIODS);
+    this.candidates = ElectionStore.cloneData(INITIAL_CANDIDATES);
+    this.voters = ElectionStore.cloneData(INITIAL_VOTERS);
+    this.votes = ElectionStore.cloneData(INITIAL_VOTES);
+    this.committee = ElectionStore.cloneData(INITIAL_COMMITTEE);
+    this.auditLogs = ElectionStore.cloneData(INITIAL_AUDIT_LOGS);
+    this.accounts = ElectionStore.cloneData(INITIAL_ACCOUNTS);
+    this.tombstones = {};
     this.logAudit('Admin Sekolah', 'RESET_DATA_DEMO', 'Database disetel ulang ke dataset simulasi awal.', '127.0.0.1', 'WARNING');
     this.notify('Admin Sekolah', 'RESET_DATA_DEMO');
   }
@@ -899,31 +1315,154 @@ export class ElectionStore {
     this.notify('Admin Sekolah', 'AKTIVASI_PERIODE_BARU');
   }
 
-  public addPeriod(period: Omit<ElectionPeriod, 'id' | 'createdAt'>): ElectionPeriod {
+  public getPeriodStats(periodId: string): UnifiedPeriodStats {
+    return computePeriodStats(
+      {
+        periods: this.periods,
+        voters: this.voters,
+        votes: this.votes,
+        candidates: this.candidates,
+        committee: this.committee,
+      },
+      periodId
+    );
+  }
+
+  public addPeriod(
+    period: Omit<ElectionPeriod, 'id' | 'createdAt'>,
+    options?: {
+      copyFromPeriodId?: string;
+      copyVoters?: boolean;
+      copyCandidates?: boolean;
+      copyCommittee?: boolean;
+      copyVotes?: boolean;
+    }
+  ): ElectionPeriod {
+    const uniqueSuffix = Math.random().toString(36).substring(2, 6);
     const newPeriod: ElectionPeriod = {
       ...period,
-      id: `period_${Date.now()}`,
+      id: `period_${Date.now()}_${uniqueSuffix}`,
       createdAt: new Date(this.getAppTimeMs()).toISOString(),
     };
     if (newPeriod.status === 'active') {
-      // Demote others
-      this.periods = this.periods.map((p) => ({ ...p, status: p.status === 'active' ? 'completed' : p.status }));
+      // Demote previous active period(s) to archived/completed without altering any of their voters, candidates, or votes
+      this.periods = this.periods.map((p) => ({
+        ...p,
+        status: p.status === 'active' ? 'completed' : p.status,
+      }));
     }
-    this.periods.push(newPeriod);
-    this.logAudit('Admin Sekolah', 'BUAT_PERIODE_BARU', `Menambahkan periode pemilihan: ${newPeriod.periodName}`, '192.168.10.1', 'INFO');
+    this.periods = [...this.periods, newPeriod];
+
+    // Optional non-destructive duplication from a source period (source period data remains 100% intact)
+    if (options?.copyFromPeriodId) {
+      const srcId = options.copyFromPeriodId;
+      const preserveVotes = Boolean(options.copyVotes && options.copyVoters && options.copyCandidates);
+      const candidateIdMap = new Map<string, string>();
+
+      if (options.copyCandidates) {
+        const clonedCandidates: Candidate[] = this.candidates
+          .filter((c) => c.electionPeriodId === srcId)
+          .map((c, idx) => {
+            const newCandId = `cand_${Date.now()}_${idx}_${Math.random().toString(36).substring(2, 6)}`;
+            candidateIdMap.set(c.id, newCandId);
+            return {
+              ...c,
+              id: newCandId,
+              electionPeriodId: newPeriod.id,
+              mission: [...c.mission],
+              programs: [...c.programs],
+            };
+          });
+        this.candidates = [...this.candidates, ...clonedCandidates];
+      }
+
+      if (options.copyVoters) {
+        const clonedVoters: Voter[] = this.voters
+          .filter((v) => v.electionPeriodId === srcId)
+          .map((v, idx) => {
+            if (preserveVotes) {
+              const unvotedPin = !v.hasVoted ? v.pinPlain || generateRandomPin(6) : undefined;
+              return {
+                ...v,
+                id: `voter_${Date.now()}_${idx}_${Math.random().toString(36).substring(2, 6)}`,
+                electionPeriodId: newPeriod.id,
+                pinPlain: v.hasVoted ? undefined : unvotedPin,
+                pinHash: v.hasVoted ? v.pinHash : v.pinPlain ? v.pinHash : hashPin(unvotedPin!),
+              };
+            }
+            const plainPin = v.pinPlain || generateRandomPin(6);
+            return {
+              ...v,
+              id: `voter_${Date.now()}_${idx}_${Math.random().toString(36).substring(2, 6)}`,
+              electionPeriodId: newPeriod.id,
+              pinPlain: plainPin,
+              pinHash: v.pinPlain ? v.pinHash : hashPin(plainPin),
+              hasVoted: false,
+              votedAt: undefined,
+              tokenPrinted: false,
+            };
+          });
+        this.voters = [...this.voters, ...clonedVoters];
+      }
+
+      if (preserveVotes) {
+        const clonedVotes: AnonymousVote[] = this.votes
+          .filter((vote) => vote.electionPeriodId === srcId && candidateIdMap.has(vote.candidateId))
+          .map((vote, idx) => ({
+            ...vote,
+            id: `vote_${Date.now()}_${idx}_${Math.random().toString(36).substring(2, 6)}`,
+            electionPeriodId: newPeriod.id,
+            candidateId: candidateIdMap.get(vote.candidateId)!,
+          }));
+        this.votes = [...this.votes, ...clonedVotes];
+      }
+
+      if (options.copyCommittee) {
+        const clonedCommittee: CommitteeMember[] = this.committee
+          .filter((m) => m.electionPeriodId === srcId)
+          .map((m, idx) => ({
+            ...m,
+            id: `comm_${Date.now()}_${idx}_${Math.random().toString(36).substring(2, 6)}`,
+            electionPeriodId: newPeriod.id,
+          }));
+        this.committee = [...this.committee, ...clonedCommittee];
+      }
+    }
+
+    this.logAudit(
+      'Admin Sekolah',
+      'BUAT_PERIODE_BARU',
+      `Menambahkan periode pemilihan: ${newPeriod.periodName} (TA ${newPeriod.academicYear})`,
+      '192.168.10.1',
+      'INFO'
+    );
     this.notify('Admin Sekolah', 'BUAT_PERIODE_BARU');
     return newPeriod;
   }
 
   public updatePeriod(periodId: string, updates: Partial<ElectionPeriod>) {
+    const activating = updates.status === 'active';
     this.periods = this.periods.map((p) => {
       if (p.id === periodId) {
-        return { ...p, ...updates };
+        return { ...p, ...updates, id: p.id };
+      }
+      if (activating && p.status === 'active') {
+        return { ...p, status: 'completed' };
       }
       return p;
     });
     this.logAudit('Admin Sekolah', 'UPDATE_PERIODE', `Memperbarui data periode ${periodId}`, '192.168.10.1', 'INFO');
     this.notify('Admin Sekolah', 'UPDATE_PERIODE');
+  }
+
+  private recordTombstones(bucket: keyof DeletedEntityTombstones, ids: string[]) {
+    if (ids.length === 0) return;
+    const prev = this.tombstones[bucket] || [];
+    const merged = Array.from(new Set([...prev, ...ids]));
+    this.tombstones = {
+      ...this.tombstones,
+      [bucket]: merged.length > 500 ? merged.slice(merged.length - 500) : merged,
+    };
   }
 
   public deletePeriod(periodId: string): { success: boolean; message: string } {
@@ -940,6 +1479,15 @@ export class ElectionStore {
     }
 
     const wasActive = targetPeriod.status === 'active';
+
+    const removedCandidateIds = this.candidates.filter((c) => c.electionPeriodId === periodId).map((c) => c.id);
+    const removedVoterIds = this.voters.filter((v) => v.electionPeriodId === periodId).map((v) => v.id);
+    const removedCommitteeIds = this.committee.filter((c) => c.electionPeriodId === periodId).map((c) => c.id);
+
+    this.recordTombstones('periods', [periodId]);
+    this.recordTombstones('candidates', removedCandidateIds);
+    this.recordTombstones('voters', removedVoterIds);
+    this.recordTombstones('committee', removedCommitteeIds);
 
     // Remove the period
     this.periods = this.periods.filter((p) => p.id !== periodId);
@@ -966,7 +1514,7 @@ export class ElectionStore {
 
     return {
       success: true,
-      message: `Periode "${targetPeriod.periodName}" berhasil dihapus.`,
+      message: `Periode "${targetPeriod.periodName}" berhasil dihapus secara permanen.`,
     };
   }
 
@@ -981,9 +1529,9 @@ export class ElectionStore {
   public addCandidate(candidate: Omit<Candidate, 'id'>): Candidate {
     const newCandidate: Candidate = {
       ...candidate,
-      id: `cand_${Date.now()}`,
+      id: `cand_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
     };
-    this.candidates.push(newCandidate);
+    this.candidates = [...this.candidates, newCandidate];
     this.logAudit(
       'Panitia',
       'TAMBAH_PASLON',
@@ -1006,10 +1554,65 @@ export class ElectionStore {
     this.notify('Panitia', 'UPDATE_PASLON');
   }
 
-  public deleteCandidate(candidateId: string) {
+  public deleteCandidate(candidateId: string): { success: boolean; message: string; removedVotes?: number } {
+    const candidate = this.candidates.find((c) => c.id === candidateId);
+    if (!candidate) {
+      return { success: false, message: 'Pasangan calon tidak ditemukan.' };
+    }
+
+    const periodId = candidate.electionPeriodId;
+    const removedVotesCount = this.votes.filter((v) => v.candidateId === candidateId).length;
+
     this.candidates = this.candidates.filter((c) => c.id !== candidateId);
-    this.logAudit('Panitia', 'HAPUS_PASLON', `Menghapus paslon ID ${candidateId}`, '192.168.10.15', 'WARNING');
+    this.votes = this.votes.filter((v) => v.candidateId !== candidateId);
+    this.recordTombstones('candidates', [candidateId]);
+
+    // Keep DPT voted count mathematically synchronized with remaining valid votes in the period
+    if (removedVotesCount > 0) {
+      const remainingValidVotesCount = this.votes.filter((v) => v.electionPeriodId === periodId).length;
+      const currentVotedVotersCount = this.voters.filter((v) => v.electionPeriodId === periodId && v.hasVoted).length;
+      let excessToRevert = Math.max(0, currentVotedVotersCount - remainingValidVotesCount);
+
+      if (excessToRevert > 0) {
+        const votedIndices = this.voters
+          .map((v, idx) => ({ v, idx }))
+          .filter((entry) => entry.v.electionPeriodId === periodId && entry.v.hasVoted)
+          .sort((a, b) => (Date.parse(b.v.votedAt || '') || 0) - (Date.parse(a.v.votedAt || '') || 0));
+
+        const updatedVoters = [...this.voters];
+        for (const entry of votedIndices) {
+          if (excessToRevert <= 0) break;
+          const newPin = generateRandomPin(6);
+          updatedVoters[entry.idx] = {
+            ...entry.v,
+            hasVoted: false,
+            votedAt: undefined,
+            pinPlain: newPin,
+            pinHash: hashPin(newPin),
+            tokenPrinted: false,
+          };
+          excessToRevert--;
+        }
+        this.voters = updatedVoters;
+      }
+    }
+
+    this.logAudit(
+      'Panitia',
+      'HAPUS_PASLON',
+      `Menghapus Paslon No. ${candidate.ballotNumber} (${candidate.chairmanName} & ${candidate.viceChairmanName})${removedVotesCount > 0 ? ` beserta ${removedVotesCount} suara terkait` : ''}.`,
+      '192.168.10.15',
+      'WARNING'
+    );
     this.notify('Panitia', 'HAPUS_PASLON');
+    return {
+      success: true,
+      removedVotes: removedVotesCount,
+      message:
+        removedVotesCount > 0
+          ? `Paslon No. ${candidate.ballotNumber} beserta ${removedVotesCount} suara terkait berhasil dihapus.`
+          : `Paslon No. ${candidate.ballotNumber} berhasil dihapus.`,
+    };
   }
 
   // --- DPT (DAFTAR PEMILIH TETAP) MANAGEMENT ---
@@ -1018,37 +1621,57 @@ export class ElectionStore {
     return this.voters.filter((v) => v.electionPeriodId === targetPeriod);
   }
 
-  public addVoter(voterData: {
-    nisn: string;
-    fullName: string;
-    className: string;
-    gradeLevel: string;
-    gender: 'L' | 'P';
-  }): { success: boolean; message: string; voter?: Voter } {
+  public addVoter(
+    voterData: {
+      nisn: string;
+      fullName: string;
+      className: string;
+      gradeLevel: string;
+      gender: 'L' | 'P';
+    },
+    periodId?: string
+  ): { success: boolean; message: string; voter?: Voter } {
     const nisnCheck = validateNisn(voterData.nisn);
     if (!nisnCheck.isValid) {
       return { success: false, message: nisnCheck.message || 'NISN tidak valid' };
     }
 
-    const activePeriod = this.getActivePeriod();
+    const targetPeriodId = periodId || this.getActivePeriod().id;
     const existing = this.voters.find(
-      (v) => v.electionPeriodId === activePeriod.id && v.nisn === voterData.nisn.trim()
+      (v) => v.electionPeriodId === targetPeriodId && v.nisn === voterData.nisn.trim()
     );
 
     if (existing) {
       return { success: false, message: `Siswa dengan NISN ${voterData.nisn} sudah terdaftar dalam DPT periode ini.` };
     }
 
+    const cleanClassName = voterData.className.trim();
+    const upperClass = cleanClassName.toUpperCase();
+    const inferredFromClass =
+      upperClass.startsWith('XII') || upperClass.startsWith('12')
+        ? 'XII'
+        : upperClass.startsWith('XI') || upperClass.startsWith('11')
+        ? 'XI'
+        : upperClass.startsWith('X') || upperClass.startsWith('10')
+        ? 'X'
+        : upperClass.startsWith('IX') || upperClass.startsWith('9')
+        ? 'IX'
+        : upperClass.startsWith('VIII') || upperClass.startsWith('8')
+        ? 'VIII'
+        : upperClass.startsWith('VII') || upperClass.startsWith('7')
+        ? 'VII'
+        : '';
+
     const plainPin = generateRandomPin(6);
     const pinHash = hashPin(plainPin);
 
     const newVoter: Voter = {
       id: `voter_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
-      electionPeriodId: activePeriod.id,
+      electionPeriodId: targetPeriodId,
       nisn: voterData.nisn.trim(),
       fullName: voterData.fullName.trim(),
-      className: voterData.className.trim(),
-      gradeLevel: voterData.gradeLevel,
+      className: cleanClassName,
+      gradeLevel: inferredFromClass || voterData.gradeLevel || 'VII',
       gender: voterData.gender,
       pinPlain: plainPin,
       pinHash,
@@ -1063,9 +1686,10 @@ export class ElectionStore {
   }
 
   public bulkImportVoters(
-    rows: Array<{ nisn: string; fullName: string; className: string; gender?: string; gradeLevel?: string }>
+    rows: Array<{ nisn: string; fullName: string; className: string; gender?: string; gradeLevel?: string }>,
+    periodId?: string
   ): { added: number; skipped: number; errors: string[] } {
-    const activePeriod = this.getActivePeriod();
+    const targetPeriodId = periodId || this.getActivePeriod().id;
     let added = 0;
     let skipped = 0;
     const errors: string[] = [];
@@ -1079,7 +1703,7 @@ export class ElectionStore {
       }
 
       const exists = this.voters.some(
-        (v) => v.electionPeriodId === activePeriod.id && v.nisn === row.nisn.trim()
+        (v) => v.electionPeriodId === targetPeriodId && v.nisn === row.nisn.trim()
       );
 
       if (exists) {
@@ -1106,7 +1730,7 @@ export class ElectionStore {
 
       this.voters.push({
         id: `voter_${Date.now()}_${index}`,
-        electionPeriodId: activePeriod.id,
+        electionPeriodId: targetPeriodId,
         nisn: row.nisn.trim(),
         fullName: row.fullName.trim(),
         className: row.className.trim(),
@@ -1155,10 +1779,11 @@ export class ElectionStore {
     return { success: true, message: 'PIN berhasil direset.', newPin };
   }
 
-  public generateMissingPins(): number {
+  public generateMissingPins(periodId?: string): number {
+    const targetPeriodId = periodId || this.getActivePeriod().id;
     let count = 0;
     this.voters = this.voters.map((v) => {
-      if (!v.hasVoted && !v.pinPlain) {
+      if (v.electionPeriodId === targetPeriodId && !v.hasVoted && !v.pinPlain) {
         const pin = generateRandomPin(6);
         count++;
         return {
@@ -1177,32 +1802,71 @@ export class ElectionStore {
   }
 
   public markTokensAsPrinted(voterIds: string[]) {
+    if (!voterIds || voterIds.length === 0) return;
     const idSet = new Set(voterIds);
+    let updatedAny = false;
     this.voters = this.voters.map((v) => {
       if (idSet.has(v.id)) {
+        if (!v.tokenPrinted) updatedAny = true;
         return { ...v, tokenPrinted: true };
       }
       return v;
     });
-    this.notify('Panitia', 'CETAK_KARTU_TOKEN');
+    if (updatedAny) {
+      this.notify('Panitia', 'CETAK_KARTU_TOKEN');
+    }
   }
 
-  public deleteVoter(voterId: string) {
+  public deleteVoter(voterId: string): { success: boolean; message: string } {
     const voter = this.voters.find((v) => v.id === voterId);
-    if (voter?.hasVoted) {
-      return { success: false, message: 'Pemilih yang sudah memilih tidak dapat dihapus untuk menjaga integritas rekapitulasi.' };
+    if (!voter) {
+      return { success: false, message: 'Pemilih tidak ditemukan di DPT.' };
     }
+
+    const wasVoted = voter.hasVoted;
     this.voters = this.voters.filter((v) => v.id !== voterId);
-    this.logAudit('Panitia', 'HAPUS_PEMILIH', `Menghapus pemilih ${voter?.fullName || voterId}`, '192.168.10.15', 'WARNING');
+    this.recordTombstones('voters', [voterId]);
+
+    // Keep anonymous vote pool synchronized with DPT when a voted student is removed
+    if (wasVoted) {
+      let removed = false;
+      this.votes = [...this.votes]
+        .reverse()
+        .filter((vote) => {
+          if (!removed && vote.electionPeriodId === voter.electionPeriodId) {
+            removed = true;
+            return false;
+          }
+          return true;
+        })
+        .reverse();
+    }
+
+    this.logAudit(
+      'Panitia',
+      'HAPUS_PEMILIH',
+      `Menghapus pemilih ${voter.fullName} (${voter.nisn}) dari DPT.`,
+      '192.168.10.15',
+      'WARNING'
+    );
     this.notify('Panitia', 'HAPUS_PEMILIH');
-    return { success: true, message: 'Pemilih berhasil dihapus dari DPT.' };
+    return {
+      success: true,
+      message: wasVoted
+        ? `Pemilih ${voter.fullName} berhasil dihapus dari DPT dan suara terkait disesuaikan.`
+        : `Pemilih ${voter.fullName} berhasil dihapus dari DPT.`,
+    };
   }
 
   public deleteAllVoters(periodId?: string): { success: boolean; message: string; count: number } {
     const targetPeriod = periodId || this.getActivePeriod().id;
-    const count = this.voters.filter((v) => v.electionPeriodId === targetPeriod).length;
+    const removedVoterIds = this.voters.filter((v) => v.electionPeriodId === targetPeriod).map((v) => v.id);
+    const count = removedVoterIds.length;
+    this.recordTombstones('voters', removedVoterIds);
     this.voters = this.voters.filter((v) => v.electionPeriodId !== targetPeriod);
-    this.logAudit('Panitia', 'HAPUS_SEMUA_DPT', `Menghapus seluruh ${count} pemilih DPT periode.`, '192.168.10.15', 'WARNING');
+    // Clear votes in this period as well so 0 DPT = 0 votes consistently across all menus
+    this.votes = this.votes.filter((v) => v.electionPeriodId !== targetPeriod);
+    this.logAudit('Panitia', 'HAPUS_SEMUA_DPT', `Menghapus seluruh ${count} pemilih DPT & surat suara periode.`, '192.168.10.15', 'WARNING');
     this.notify('Panitia', 'HAPUS_SEMUA_DPT');
     return { success: true, message: `Berhasil menghapus seluruh ${count} siswa dari DPT.`, count };
   }
@@ -1238,12 +1902,35 @@ export class ElectionStore {
     const voter = this.voters.find((v) => v.id === voterId);
     if (!voter) return { success: false, message: 'Pemilih tidak ditemukan.' };
 
+    const wasVoted = voter.hasVoted;
     const newPin = generateRandomPin(6);
-    voter.hasVoted = false;
-    voter.votedAt = undefined;
-    voter.pinPlain = newPin;
-    voter.pinHash = hashPin(newPin);
-    voter.tokenPrinted = false;
+    this.voters = this.voters.map((v) =>
+      v.id === voterId
+        ? {
+            ...v,
+            hasVoted: false,
+            votedAt: undefined,
+            pinPlain: newPin,
+            pinHash: hashPin(newPin),
+            tokenPrinted: false,
+          }
+        : v
+    );
+
+    // Keep anonymous votes pool synchronized with voted-voter count when resetting a voter who had cast a ballot
+    if (wasVoted) {
+      let removed = false;
+      this.votes = [...this.votes]
+        .reverse()
+        .filter((vote) => {
+          if (!removed && vote.electionPeriodId === voter.electionPeriodId) {
+            removed = true;
+            return false;
+          }
+          return true;
+        })
+        .reverse();
+    }
 
     this.logAudit(
       'Panitia',
@@ -1311,7 +1998,91 @@ export class ElectionStore {
   }
 
   /**
-   * ATOMIC ANONYMOUS VOTE SUBMISSION
+   * SERVER-AUTHORITATIVE VOTER AUTHENTICATION FOR CONCURRENT ONLINE VOTING
+   * Ensures NISN/PIN & hasVoted checks run against live central server state across all booths.
+   */
+  public async verifyVoterLoginOnline(
+    nisn: string,
+    pin: string
+  ): Promise<{
+    success: boolean;
+    message: string;
+    voter?: Voter;
+    activePeriod?: ElectionPeriod;
+  }> {
+    if (typeof window !== 'undefined' && typeof fetch !== 'undefined') {
+      try {
+        const res = await fetch('/api/voter-auth', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ nisn, pin }),
+        });
+        const data = await res.json();
+        if (typeof data.serverTimeMs === 'number') {
+          this.serverClockOffsetMs = calculateServerClockOffset(data.serverTimeMs, Date.now());
+        }
+        if (typeof data.onlineClients === 'number') {
+          this.onlineClients = data.onlineClients;
+        }
+        if (data && typeof data.success === 'boolean') {
+          if (!data.success && (res.status === 409 || res.status === 404 || res.status === 403)) {
+            void this.fetchStateFromHttp(true);
+          }
+          if (data.success && data.voter) {
+            // Upsert authoritative voter & activePeriod synchronously so Bilik & Panitia match immediately
+            this.isApplyingRemoteState = true;
+            try {
+              const incomingVoter = data.voter as Voter;
+              const existingIdx = this.voters.findIndex((v) => v.id === incomingVoter.id);
+              if (existingIdx >= 0) {
+                this.voters = this.voters.map((v, idx) => (idx === existingIdx ? incomingVoter : v));
+              } else {
+                this.voters = [...this.voters, incomingVoter];
+              }
+              if (data.activePeriod) {
+                const incomingPeriod = data.activePeriod as ElectionPeriod;
+                const pExists = this.periods.some((p) => p.id === incomingPeriod.id);
+                if (pExists) {
+                  this.periods = this.periods.map((p) =>
+                    p.id === incomingPeriod.id
+                      ? incomingPeriod
+                      : p.status === 'active'
+                      ? { ...p, status: 'completed' }
+                      : p
+                  );
+                } else {
+                  this.periods = [
+                    ...this.periods.map((p) => (p.status === 'active' ? { ...p, status: 'completed' as const } : p)),
+                    incomingPeriod,
+                  ];
+                }
+              }
+              this.saveToStorage();
+            } finally {
+              this.isApplyingRemoteState = false;
+            }
+            this.emitToListeners();
+
+            if (typeof data.revision === 'number' && data.revision > this.revision) {
+              void this.fetchStateFromHttp(true);
+            }
+          }
+          return {
+            success: data.success,
+            message: data.message,
+            voter: data.voter,
+            activePeriod: data.activePeriod,
+          };
+        }
+      } catch {
+        // Fallback to local verification if offline
+      }
+    }
+    return this.verifyVoterLogin(nisn, pin);
+  }
+
+  /**
+   * ATOMIC ANONYMOUS VOTE SUBMISSION (LOCAL + FALLBACK)
    * 1. Records vote in `votes` table WITHOUT any reference to voterId (True LUBER-JURDIL).
    * 2. Marks voter in `voters` table as `hasVoted = true` with timestamp.
    * 3. Burns/invalidates voter's plain PIN token.
@@ -1380,6 +2151,79 @@ export class ElectionStore {
     };
   }
 
+  /**
+   * SERVER-AUTHORITATIVE ATOMIC ONLINE VOTE SUBMISSION
+   * Commits the vote directly on the central server (/api/vote) so concurrent student booths
+   * never overwrite each other's votes and all Quick Count screens update instantaneously.
+   */
+  public async submitAnonymousVoteOnline(
+    voterId: string,
+    candidateId: string
+  ): Promise<{
+    success: boolean;
+    message: string;
+    receiptCode?: string;
+  }> {
+    if (typeof window !== 'undefined' && typeof fetch !== 'undefined') {
+      try {
+        const res = await fetch('/api/vote', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            voterId,
+            candidateId,
+            senderId: this.clientId,
+          }),
+        });
+        const data = await res.json();
+
+        if (!res.ok || !data.success) {
+          void this.forceResyncWithServer();
+          return {
+            success: false,
+            message: data?.message || 'Gagal mencatat suara pada server.',
+          };
+        }
+
+        // Apply authoritative delta from server & notify local BroadcastChannel tabs immediately
+        this.applyServerVoteDelta({
+          vote: data.vote,
+          voterUpdate: data.voterUpdate,
+          auditLog: data.auditLog,
+          revision: data.revision,
+          epochId: data.epochId,
+          updatedAt: data.updatedAt,
+          updatedBy: 'Siswa',
+          lastAction: 'TRANSAKSI_SUARA_ANONIM',
+          serverTimeMs: data.serverTimeMs,
+          onlineClients: data.onlineClients,
+        });
+
+        if (this.broadcastChannel) {
+          try {
+            this.broadcastChannel.postMessage({
+              type: 'STATE_UPDATED',
+              state: this.getSnapshot(),
+              senderId: this.clientId,
+              serverTimeMs: data.serverTimeMs,
+              onlineClients: data.onlineClients,
+            });
+          } catch {}
+        }
+
+        return {
+          success: true,
+          message: data.message,
+          receiptCode: data.receiptCode,
+        };
+      } catch {
+        // Fallback to local atomic vote if server is unreachable
+      }
+    }
+
+    return this.submitAnonymousVote(voterId, candidateId);
+  }
+
   // --- COMMITTEE MANAGEMENT ---
   public getCommittee(periodId?: string): CommitteeMember[] {
     const target = periodId || this.getActivePeriod().id;
@@ -1389,21 +2233,38 @@ export class ElectionStore {
   public addCommitteeMember(member: Omit<CommitteeMember, 'id'>) {
     const newMember: CommitteeMember = {
       ...member,
-      id: `comm_${Date.now()}`,
+      id: `comm_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
     };
-    this.committee.push(newMember);
+    this.committee = [...this.committee, newMember];
     this.logAudit('Admin Sekolah', 'TAMBAH_PANITIA', `Menambahkan anggota panitia: ${newMember.memberName} (${newMember.role})`, '192.168.10.1', 'INFO');
     this.notify('Admin Sekolah', 'TAMBAH_PANITIA');
     return newMember;
   }
 
   public updateCommitteeMember(id: string, updates: Partial<CommitteeMember>) {
+    const existing = this.committee.find((c) => c.id === id);
     this.committee = this.committee.map((c) => (c.id === id ? { ...c, ...updates } : c));
+    this.logAudit(
+      'Admin Sekolah',
+      'UPDATE_PANITIA',
+      `Memperbarui data anggota panitia: ${updates.memberName || existing?.memberName || id}`,
+      '192.168.10.1',
+      'INFO'
+    );
     this.notify('Admin Sekolah', 'UPDATE_PANITIA');
   }
 
   public deleteCommitteeMember(id: string) {
+    const existing = this.committee.find((c) => c.id === id);
+    this.recordTombstones('committee', [id]);
     this.committee = this.committee.filter((c) => c.id !== id);
+    this.logAudit(
+      'Admin Sekolah',
+      'HAPUS_PANITIA',
+      `Menghapus anggota panitia: ${existing?.memberName || id} (${existing?.role || '-'})`,
+      '192.168.10.1',
+      'WARNING'
+    );
     this.notify('Admin Sekolah', 'HAPUS_PANITIA');
   }
 
@@ -1438,63 +2299,25 @@ export class ElectionStore {
 
   // --- STATS & REALTIME SUMMARY ---
   public getSummary(periodId?: string): ElectionSummary {
-    const targetPeriod = periodId
-      ? this.periods.find((p) => p.id === periodId) || this.getActivePeriod()
-      : this.getActivePeriod();
-
-    const votersInPeriod = this.voters.filter((v) => v.electionPeriodId === targetPeriod.id);
-    const votesInPeriod = this.votes.filter((v) => v.electionPeriodId === targetPeriod.id);
-    const candidatesInPeriod = this.candidates
-      .filter((c) => c.electionPeriodId === targetPeriod.id)
-      .sort((a, b) => a.ballotNumber - b.ballotNumber);
-
-    const totalVoters = votersInPeriod.length;
-    const totalVoted = Math.max(votersInPeriod.filter((v) => v.hasVoted).length, votesInPeriod.length);
-    const totalUnvoted = Math.max(0, totalVoters - totalVoted);
-    const participationPercentage = totalVoters > 0 ? (totalVoted / totalVoters) * 100 : 0;
-
-    // Count votes per candidate
-    const voteMap = new Map<string, number>();
-    votesInPeriod.forEach((vote) => {
-      voteMap.set(vote.candidateId, (voteMap.get(vote.candidateId) || 0) + 1);
-    });
-
-    const candidatesResults = candidatesInPeriod.map((cand) => {
-      const count = voteMap.get(cand.id) || 0;
-      const percentage = totalVoted > 0 ? (count / totalVoted) * 100 : 0;
-      return {
-        candidate: cand,
-        voteCount: count,
-        percentage: Number(percentage.toFixed(2)),
-      };
-    });
-
-    // Breakdown per class
-    const classMap = new Map<string, { total: number; voted: number }>();
-    votersInPeriod.forEach((v) => {
-      const current = classMap.get(v.className) || { total: 0, voted: 0 };
-      current.total += 1;
-      if (v.hasVoted) current.voted += 1;
-      classMap.set(v.className, current);
-    });
-
-    const classParticipation = Array.from(classMap.entries())
-      .map(([className, data]) => ({
-        className,
-        total: data.total,
-        voted: data.voted,
-        percentage: data.total > 0 ? Number(((data.voted / data.total) * 100).toFixed(1)) : 0,
-      }))
-      .sort((a, b) => a.className.localeCompare(b.className));
-
+    const tab = computePeriodTabulation(
+      {
+        periods: this.periods,
+        voters: this.voters,
+        votes: this.votes,
+        candidates: this.candidates,
+        committee: this.committee,
+      },
+      periodId
+    );
     return {
-      period: targetPeriod,
-      totalVoters,
-      totalVoted,
-      totalUnvoted,
-      participationPercentage: Number(participationPercentage.toFixed(2)),
-      candidatesResults,
-      classParticipation,
+      period: tab.period,
+      totalVoters: tab.totalVoters,
+      totalVoted: tab.totalVoted,
+      totalUnvoted: tab.totalUnvoted,
+      participationPercentage: tab.participationPercentage,
+      abstainPercentage: tab.abstainPercentage,
+      candidatesResults: tab.candidatesResults,
+      classParticipation: tab.classParticipation,
     };
   }
 }

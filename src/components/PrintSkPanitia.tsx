@@ -24,6 +24,7 @@ import {
 import { SchoolConfig, ElectionPeriod, CommitteeMember, OrganizationType } from '../types';
 import { electionStore } from '../lib/store';
 import { SchoolCrestLogo, OsisLogoBadge } from './CandidateAvatar';
+import { useAppDialog } from './ConfirmDialog';
 import {
   clampZoomScale,
   getPageBreakStyle,
@@ -77,6 +78,7 @@ export const PrintSkPanitia: React.FC<PrintSkPanitiaProps> = ({
   const [saveToast, setSaveToast] = useState<string | null>(null);
   const [onlyDocumentMode, setOnlyDocumentMode] = useState<boolean>(false);
   const [zoomScale, setZoomScale] = useState<number>(100);
+  const { dialogNode, confirmDialog, alertDialog } = useAppDialog();
 
   // Isolate SK preview & print from all background DOM objects (#root, canvas, navbar)
   useEffect(() => {
@@ -142,12 +144,18 @@ export const PrintSkPanitia: React.FC<PrintSkPanitiaProps> = ({
   const [isUploadingOsis, setIsUploadingOsis] = useState<boolean>(false);
   const [osisUrlInput, setOsisUrlInput] = useState<string>(school.osisLogoUrl || '');
 
+  useEffect(() => {
+    setSchoolLogoUrl(school.logoUrl || '');
+    setOsisLogoUrl(school.osisLogoUrl || '');
+    setOsisUrlInput(school.osisLogoUrl || '');
+  }, [school.logoUrl, school.osisLogoUrl]);
+
   const handleUploadOsisFile = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
 
     if (file.size > 10 * 1024 * 1024) {
-      alert('Ukuran file logo terlalu besar (maksimal 10MB).');
+      void alertDialog({ title: 'Ukuran File Terlalu Besar', message: 'Ukuran file logo terlalu besar (maksimal 10MB).', variant: 'warning' });
       return;
     }
 
@@ -163,7 +171,7 @@ export const PrintSkPanitia: React.FC<PrintSkPanitiaProps> = ({
     };
     reader.onerror = () => {
       setIsUploadingOsis(false);
-      alert('Gagal membaca file gambar logo.');
+      void alertDialog({ title: 'Gagal Membaca Gambar', message: 'Gagal membaca file gambar logo.', variant: 'error' });
     };
     reader.readAsDataURL(file);
   };
@@ -187,7 +195,7 @@ export const PrintSkPanitia: React.FC<PrintSkPanitiaProps> = ({
     const file = e.target.files?.[0];
     if (!file) return;
     if (file.size > 10 * 1024 * 1024) {
-      alert('Ukuran file logo terlalu besar (maksimal 10MB).');
+      void alertDialog({ title: 'Ukuran File Terlalu Besar', message: 'Ukuran file logo terlalu besar (maksimal 10MB).', variant: 'warning' });
       return;
     }
     const reader = new FileReader();
@@ -645,7 +653,7 @@ export const PrintSkPanitia: React.FC<PrintSkPanitiaProps> = ({
 
   const handleDeleteCommitteeMember = (id: string) => {
     if (committeeList.length <= 1) {
-      alert('Minimal harus ada 1 anggota panitia.');
+      void alertDialog({ title: 'Batas Minimal Anggota', message: 'Minimal harus ada 1 anggota panitia.', variant: 'warning' });
       return;
     }
     setCommitteeList((prev) => prev.filter((c) => c.id !== id));
@@ -722,7 +730,7 @@ export const PrintSkPanitia: React.FC<PrintSkPanitiaProps> = ({
 
   const handleAddSinglePage = () => {
     if (pages.length >= 99) {
-      alert('Batas maksimal halaman yang didukung adalah 99 halaman.');
+      void alertDialog({ title: 'Batas Maksimal Halaman', message: 'Batas maksimal halaman yang didukung adalah 99 halaman.', variant: 'warning' });
       return;
     }
     const nextNum = pages.length + 1;
@@ -740,7 +748,7 @@ export const PrintSkPanitia: React.FC<PrintSkPanitiaProps> = ({
 
   const handleDeletePage = (pageIndex: number) => {
     if (pages.length <= 1) {
-      alert('Minimal dokumen harus memiliki 1 halaman.');
+      void alertDialog({ title: 'Batas Minimal Halaman', message: 'Minimal dokumen harus memiliki 1 halaman.', variant: 'warning' });
       return;
     }
     const updated = pages
@@ -778,6 +786,7 @@ export const PrintSkPanitia: React.FC<PrintSkPanitiaProps> = ({
     );
     // 1. Update School Info in store
     electionStore.updateSchool({
+      name: schoolCustomName.trim() || school.name,
       principalName: principalName.trim(),
       principalNip: principalNip.trim(),
       city: skCity.trim(),
@@ -799,10 +808,19 @@ export const PrintSkPanitia: React.FC<PrintSkPanitiaProps> = ({
       academicYear: academicYear.trim(),
     });
 
-    // 3. Update committee in store
-    committeeList.forEach((c) => {
-      // Find matching or create
-      const exists = initialCommittee.find((orig) => orig.id === c.id);
+    // 3. Update committee in store (upsert remaining & remove deleted original members)
+    const remainingIds = new Set(committeeList.map((c) => c.id));
+    const currentStoreCommittee = electionStore.getCommittee(period.id);
+    if (currentStoreCommittee.length > 0) {
+      currentStoreCommittee.forEach((orig) => {
+        if (!remainingIds.has(orig.id)) {
+          electionStore.deleteCommitteeMember(orig.id);
+        }
+      });
+    }
+
+    const syncedCommitteeList = committeeList.map((c) => {
+      const exists = currentStoreCommittee.find((orig) => orig.id === c.id);
       if (exists) {
         electionStore.updateCommitteeMember(c.id, {
           memberName: c.memberName,
@@ -811,8 +829,9 @@ export const PrintSkPanitia: React.FC<PrintSkPanitiaProps> = ({
           skNumber: skNumber,
           skDate: skDate,
         });
+        return c;
       } else if (c.memberName.trim()) {
-        electionStore.addCommitteeMember({
+        const created = electionStore.addCommitteeMember({
           electionPeriodId: period.id,
           memberName: c.memberName.trim(),
           role: c.role as any,
@@ -821,15 +840,25 @@ export const PrintSkPanitia: React.FC<PrintSkPanitiaProps> = ({
           skDate: skDate,
           email: `${c.memberName.toLowerCase().replace(/\s+/g, '')}@sekolah.id`,
         });
+        return { ...c, id: created.id };
       }
+      return c;
     });
+    setCommitteeList(syncedCommitteeList);
 
     showToast('Seluruh perubahan SK, acara, dan data Panitia berhasil disimpan & disinkronkan ke sistem!');
   };
 
   // --- RESET TO OFFICIAL TEMPLATE ---
-  const handleResetToDefault = () => {
-    if (!confirm('Apakah Anda yakin ingin mereset seluruh format SK ke template kedinasan bawaan?')) return;
+  const handleResetToDefault = async () => {
+    const confirmed = await confirmDialog({
+      title: 'Reset Format SK Kedinasan',
+      message: 'Apakah Anda yakin ingin mereset seluruh format SK ke template kedinasan bawaan?',
+      confirmText: 'Reset Template',
+      cancelText: 'Batal',
+      variant: 'warning',
+    });
+    if (!confirmed) return;
     setSkNumber(defaultSkNum);
     setSkDate(defaultSkDate);
     setSkCity(school.city || 'Kota Administrasi');
@@ -3832,6 +3861,7 @@ export const PrintSkPanitia: React.FC<PrintSkPanitiaProps> = ({
           </div>
         </div>
       )}
+      {dialogNode}
     </div>,
     document.body
   );

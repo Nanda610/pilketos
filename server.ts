@@ -23,15 +23,28 @@ import {
   INITIAL_AUDIT_LOGS,
   INITIAL_ACCOUNTS,
 } from './src/lib/initialData';
-import { ElectionStateSnapshot, SchoolConfig } from './src/types';
+import {
+  AnonymousVote,
+  AuditLog,
+  ElectionPeriod,
+  ElectionStateSnapshot,
+  SchoolConfig,
+  Voter,
+} from './src/types';
+import { validateNisn, validatePin, verifyPin } from './src/lib/security';
+import { DEFAULT_EPOCH_ID } from './src/lib/realtimeSync';
+import { applyAuthoritativeStateUpdate } from './src/lib/stateMerge';
+import { computePeriodTabulation } from './src/lib/tabulation';
 
 const PORT = Number(process.env.PORT) || 3000;
 const DATA_DIR = path.join(process.cwd(), '.data');
 const STATE_FILE = path.join(DATA_DIR, 'election-state.json');
+const TEMP_STATE_FILE = path.join(DATA_DIR, 'election-state.json.tmp');
 
 function createInitialSnapshot(): ElectionStateSnapshot {
   return {
     revision: 1,
+    epochId: DEFAULT_EPOCH_ID,
     updatedAt: new Date().toISOString(),
     updatedBy: 'Server Utama',
     lastAction: 'INIT_SYSTEM',
@@ -44,6 +57,7 @@ function createInitialSnapshot(): ElectionStateSnapshot {
     committee: INITIAL_COMMITTEE,
     auditLogs: INITIAL_AUDIT_LOGS,
     accounts: INITIAL_ACCOUNTS,
+    tombstones: {},
   };
 }
 
@@ -52,23 +66,19 @@ function loadStateFromDisk(): ElectionStateSnapshot {
     if (fs.existsSync(STATE_FILE)) {
       const raw = fs.readFileSync(STATE_FILE, 'utf-8');
       const parsed = JSON.parse(raw) as Partial<ElectionStateSnapshot>;
-      if (parsed && parsed.school && Array.isArray(parsed.periods)) {
+      if (parsed && parsed.school && Array.isArray(parsed.periods) && parsed.periods.length > 0) {
         const rawSchool = parsed.school || {};
-        const isDefaultPlaceholder = !rawSchool.name || rawSchool.name.trim() === '' || rawSchool.name === 'SMP Negeri 1 Teladan Jakarta';
         const schoolConfig: SchoolConfig = {
           ...INITIAL_SCHOOL,
           ...rawSchool,
-          name: isDefaultPlaceholder ? INITIAL_SCHOOL.name : rawSchool.name,
-          type: rawSchool.type && rawSchool.type.trim() !== '' ? rawSchool.type : INITIAL_SCHOOL.type,
-          npsn: rawSchool.npsn && rawSchool.npsn.trim() !== '' ? rawSchool.npsn : INITIAL_SCHOOL.npsn,
-          address: rawSchool.address && rawSchool.address.trim() !== '' ? rawSchool.address : INITIAL_SCHOOL.address,
-          city: rawSchool.city && rawSchool.city.trim() !== '' ? rawSchool.city : INITIAL_SCHOOL.city,
-          province: rawSchool.province && rawSchool.province.trim() !== '' ? rawSchool.province : INITIAL_SCHOOL.province,
-          principalName: rawSchool.principalName && rawSchool.principalName.trim() !== '' ? rawSchool.principalName : INITIAL_SCHOOL.principalName,
+          name: typeof rawSchool.name === 'string' && rawSchool.name.trim() !== '' ? rawSchool.name : INITIAL_SCHOOL.name,
+          type: rawSchool.type === 'OSIS' || rawSchool.type === 'OSIM' ? rawSchool.type : INITIAL_SCHOOL.type,
+          openingVideoEnabled: rawSchool.openingVideoEnabled !== false,
         };
 
         return {
           revision: typeof parsed.revision === 'number' ? parsed.revision : 1,
+          epochId: typeof parsed.epochId === 'string' && parsed.epochId ? parsed.epochId : DEFAULT_EPOCH_ID,
           updatedAt: parsed.updatedAt || new Date().toISOString(),
           updatedBy: parsed.updatedBy || 'Server Utama',
           lastAction: parsed.lastAction || 'LOAD_DISK',
@@ -81,6 +91,7 @@ function loadStateFromDisk(): ElectionStateSnapshot {
           committee: Array.isArray(parsed.committee) ? parsed.committee : INITIAL_COMMITTEE,
           auditLogs: Array.isArray(parsed.auditLogs) ? parsed.auditLogs : INITIAL_AUDIT_LOGS,
           accounts: Array.isArray(parsed.accounts) ? parsed.accounts : INITIAL_ACCOUNTS,
+          tombstones: parsed.tombstones || {},
         };
       }
     }
@@ -95,7 +106,8 @@ function saveStateToDisk(state: ElectionStateSnapshot) {
     if (!fs.existsSync(DATA_DIR)) {
       fs.mkdirSync(DATA_DIR, { recursive: true });
     }
-    fs.writeFileSync(STATE_FILE, JSON.stringify(state), 'utf-8');
+    fs.writeFileSync(TEMP_STATE_FILE, JSON.stringify(state), 'utf-8');
+    fs.renameSync(TEMP_STATE_FILE, STATE_FILE);
   } catch (err) {
     console.error('[E-Pilketos Server] Gagal menyimpan state ke disk:', err);
   }
@@ -161,37 +173,203 @@ async function startServer() {
     updatedBy: string = 'Admin Sekolah',
     lastAction: string = 'SYNC_UPDATE'
   ): ElectionStateSnapshot => {
-    const nextOffset =
-      typeof incoming.appTimeOffsetMs === 'number'
-        ? incoming.appTimeOffsetMs
-        : authoritativeState.appTimeOffsetMs;
-
-    const appNowIso = new Date(Date.now() + nextOffset).toISOString();
-
-    const nextRevision =
-      Math.max(
-        authoritativeState.revision,
-        typeof incoming.revision === 'number' ? incoming.revision : 0
-      ) + 1;
-
-    authoritativeState = {
-      revision: nextRevision,
-      updatedAt: appNowIso,
-      updatedBy: updatedBy || incoming.updatedBy || 'Admin Sekolah',
-      lastAction: lastAction || incoming.lastAction || 'SYNC_UPDATE',
-      appTimeOffsetMs: nextOffset,
-      school: incoming.school ?? authoritativeState.school,
-      periods: incoming.periods ?? authoritativeState.periods,
-      candidates: incoming.candidates ?? authoritativeState.candidates,
-      voters: incoming.voters ?? authoritativeState.voters,
-      votes: incoming.votes ?? authoritativeState.votes,
-      committee: incoming.committee ?? authoritativeState.committee,
-      auditLogs: incoming.auditLogs ?? authoritativeState.auditLogs,
-      accounts: incoming.accounts ?? authoritativeState.accounts ?? INITIAL_ACCOUNTS,
-    };
+    authoritativeState = applyAuthoritativeStateUpdate({
+      current: authoritativeState,
+      incoming,
+      updatedBy,
+      lastAction,
+      defaultAccounts: INITIAL_ACCOUNTS,
+    });
 
     saveStateToDisk(authoritativeState);
     return authoritativeState;
+  };
+
+  const getActivePeriodOnServer = (): ElectionPeriod => {
+    return (
+      authoritativeState.periods.find((p) => p.status === 'active') ||
+      authoritativeState.periods[0]
+    );
+  };
+
+  const authenticateVoterOnServer = (nisnRaw: string, pinRaw: string) => {
+    const nisn = (nisnRaw || '').trim();
+    const pin = (pinRaw || '').trim().toUpperCase();
+
+    const nisnCheck = validateNisn(nisn);
+    if (!nisnCheck.isValid) {
+      return { success: false, statusCode: 400, message: nisnCheck.message || 'Format NISN tidak valid.' };
+    }
+    const pinCheck = validatePin(pin);
+    if (!pinCheck.isValid) {
+      return { success: false, statusCode: 400, message: pinCheck.message || 'Format PIN token tidak valid.' };
+    }
+
+    const activePeriod = getActivePeriodOnServer();
+    if (!activePeriod || activePeriod.status !== 'active') {
+      return { success: false, statusCode: 403, message: 'Pemungutan suara saat ini tidak aktif atau telah ditutup.' };
+    }
+
+    const voter = authoritativeState.voters.find(
+      (v) => v.electionPeriodId === activePeriod.id && v.nisn === nisn
+    );
+
+    if (!voter) {
+      return { success: false, statusCode: 404, message: 'NISN tidak terdaftar dalam Daftar Pemilih Tetap (DPT) periode ini.' };
+    }
+
+    if (voter.hasVoted) {
+      return {
+        success: false,
+        statusCode: 409,
+        message: `Hak suara dengan NISN ${nisn} sudah pernah digunakan pada ${
+          voter.votedAt ? new Date(voter.votedAt).toLocaleTimeString('id-ID') : 'perangkat lain sebelumnya'
+        }. Satu pemilih hanya memiliki 1 hak suara.`,
+      };
+    }
+
+    if (!verifyPin(pin, voter.pinHash)) {
+      return {
+        success: false,
+        statusCode: 401,
+        message: 'Token PIN yang Anda masukkan salah. Pastikan PIN sesuai dengan kartu suara Anda.',
+      };
+    }
+
+    return {
+      success: true,
+      statusCode: 200,
+      message: 'Otentikasi berhasil. Selamat datang di bilik suara.',
+      voter,
+      activePeriod,
+    };
+  };
+
+  const castAtomicVoteOnServer = (
+    voterId: string,
+    candidateId: string,
+    senderId?: string
+  ): {
+    success: boolean;
+    statusCode: number;
+    message: string;
+    receiptCode?: string;
+    vote?: AnonymousVote;
+    voterUpdate?: { id: string; hasVoted: boolean; votedAt: string };
+    auditLog?: AuditLog;
+    revision?: number;
+    updatedAt?: string;
+    epochId?: string;
+  } => {
+    const voterIndex = authoritativeState.voters.findIndex((v) => v.id === voterId);
+    if (voterIndex === -1) {
+      return { success: false, statusCode: 404, message: 'Data pemilih tidak valid atau tidak terdaftar di server.' };
+    }
+
+    const voter = authoritativeState.voters[voterIndex];
+    if (voter.hasVoted) {
+      return {
+        success: false,
+        statusCode: 409,
+        message: 'Hak suara telah digunakan sebelumnya pada perangkat ini atau perangkat lain. Suara ganda ditolak sistem.',
+      };
+    }
+
+    const activePeriod = getActivePeriodOnServer();
+    if (!activePeriod || activePeriod.status !== 'active') {
+      return { success: false, statusCode: 403, message: 'Periode pemilihan saat ini tidak aktif.' };
+    }
+    if (voter.electionPeriodId !== activePeriod.id) {
+      return { success: false, statusCode: 403, message: 'Pemilih tidak termasuk dalam periode aktif saat ini.' };
+    }
+
+    const candidate = authoritativeState.candidates.find(
+      (c) => c.id === candidateId && c.electionPeriodId === activePeriod.id
+    );
+    if (!candidate) {
+      return { success: false, statusCode: 404, message: 'Pasangan calon yang dipilih tidak sah.' };
+    }
+
+    const appNowIso = new Date(Date.now() + authoritativeState.appTimeOffsetMs).toISOString();
+    const anonymousVote: AnonymousVote = {
+      id: `vote_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`,
+      electionPeriodId: activePeriod.id,
+      candidateId: candidate.id,
+      createdAt: appNowIso,
+    };
+
+    const receiptCode = `PILKETOS-${Math.abs(Date.now() % 1000000)
+      .toString()
+      .padStart(6, '0')}-${Math.random().toString(36).substring(2, 6).toUpperCase()}`;
+
+    const auditLog: AuditLog = {
+      id: `log_${Date.now()}_${Math.random().toString(36).substring(2, 5)}`,
+      userId: 'siswa',
+      userRole: 'Siswa',
+      action: 'TRANSAKSI_SUARA_ANONIM',
+      details: `Surat suara digital sah telah disalurkan dan dihitung. Kode verifikasi transaksi: ${receiptCode}.`,
+      ipAddress: 'online-booth',
+      timestamp: appNowIso,
+      severity: 'INFO',
+    };
+
+    const updatedVoters = [...authoritativeState.voters];
+    updatedVoters[voterIndex] = {
+      ...voter,
+      hasVoted: true,
+      votedAt: appNowIso,
+      pinPlain: undefined,
+    };
+
+    const nextAuditLogs = [auditLog, ...authoritativeState.auditLogs].slice(0, 200);
+    const nextRevision = authoritativeState.revision + 1;
+
+    authoritativeState = {
+      ...authoritativeState,
+      revision: nextRevision,
+      updatedAt: appNowIso,
+      updatedBy: 'Siswa',
+      lastAction: 'TRANSAKSI_SUARA_ANONIM',
+      voters: updatedVoters,
+      votes: [...authoritativeState.votes, anonymousVote],
+      auditLogs: nextAuditLogs,
+    };
+
+    saveStateToDisk(authoritativeState);
+
+    const voterUpdate = {
+      id: voter.id,
+      hasVoted: true,
+      votedAt: appNowIso,
+    };
+
+    // Broadcast lightweight delta so all connected Quick Count & Booth screens update in real-time (<50ms)
+    broadcastToAll({
+      type: 'VOTE_CAST',
+      vote: anonymousVote,
+      voterUpdate,
+      auditLog,
+      revision: nextRevision,
+      epochId: authoritativeState.epochId,
+      updatedAt: appNowIso,
+      updatedBy: 'Siswa',
+      lastAction: 'TRANSAKSI_SUARA_ANONIM',
+      appTimeOffsetMs: authoritativeState.appTimeOffsetMs,
+      senderId,
+    });
+
+    return {
+      success: true,
+      statusCode: 200,
+      message: 'Suara Anda telah berhasil dicatat secara sah, rahasia, dan tersinkronisasi live.',
+      receiptCode,
+      vote: anonymousVote,
+      voterUpdate,
+      auditLog,
+      revision: nextRevision,
+      updatedAt: appNowIso,
+      epochId: authoritativeState.epochId,
+    };
   };
 
   wss.on('connection', (ws) => {
@@ -350,12 +528,82 @@ async function startServer() {
   app.get('/api/revision', (_req, res) => {
     res.json({
       revision: authoritativeState.revision,
+      epochId: authoritativeState.epochId,
       updatedAt: authoritativeState.updatedAt,
       updatedBy: authoritativeState.updatedBy,
       lastAction: authoritativeState.lastAction,
       appTimeOffsetMs: authoritativeState.appTimeOffsetMs,
       serverTimeMs: Date.now(),
       onlineClients: getOnlineCount(),
+    });
+  });
+
+  app.post('/api/voter-auth', (req, res) => {
+    const { nisn, pin } = req.body || {};
+    const authResult = authenticateVoterOnServer(nisn, pin);
+    res.status(authResult.statusCode).json({
+      success: authResult.success,
+      message: authResult.message,
+      voter: authResult.voter,
+      activePeriod: authResult.activePeriod,
+      revision: authoritativeState.revision,
+      serverTimeMs: Date.now(),
+      onlineClients: getOnlineCount(),
+    });
+  });
+
+  app.post('/api/vote', (req, res) => {
+    const { voterId, candidateId, senderId } = req.body || {};
+    if (!voterId || !candidateId) {
+      res.status(400).json({ success: false, message: 'Parameter pemilih dan kandidat wajib disertakan.' });
+      return;
+    }
+
+    const result = castAtomicVoteOnServer(voterId, candidateId, senderId);
+    res.status(result.statusCode).json({
+      ...result,
+      serverTimeMs: Date.now(),
+      onlineClients: getOnlineCount(),
+    });
+  });
+
+  app.get('/api/public-summary', (req, res) => {
+    const requestedPeriodId = typeof req.query.periodId === 'string' ? req.query.periodId : undefined;
+    const summary = computePeriodTabulation(
+      {
+        periods: authoritativeState.periods,
+        voters: authoritativeState.voters,
+        votes: authoritativeState.votes,
+        candidates: authoritativeState.candidates,
+        committee: authoritativeState.committee,
+      },
+      requestedPeriodId
+    );
+
+    res.json({
+      schoolName: authoritativeState.school.name,
+      schoolType: authoritativeState.school.type,
+      schoolNpsn: authoritativeState.school.npsn,
+      period: summary.period,
+      totalVoters: summary.totalVoters,
+      totalVoted: summary.totalVoted,
+      totalUnvoted: summary.totalUnvoted,
+      participationPercentage: summary.participationPercentage,
+      candidatesResults: summary.candidatesResults.map((r) => ({
+        id: r.candidate.id,
+        ballotNumber: r.candidate.ballotNumber,
+        chairmanName: r.candidate.chairmanName,
+        viceChairmanName: r.candidate.viceChairmanName,
+        voteCount: r.voteCount,
+        percentage: r.percentage,
+      })),
+      classParticipation: summary.classParticipation,
+      committeeCount: summary.committeeCount,
+      revision: authoritativeState.revision,
+      epochId: authoritativeState.epochId,
+      updatedAt: authoritativeState.updatedAt,
+      onlineClients: getOnlineCount(),
+      serverTimeMs: Date.now(),
     });
   });
 

@@ -63,3 +63,84 @@ test('Atomic voting: registers anonymous vote without voter link and prevents do
   )?.voteCount || 0;
   assert.equal(newCandVotes, initialCandVotes + 1);
 });
+
+test('Creating a new period preserves all 5 datasets on source period and supports permanent cloning with/without votes until manual delete', () => {
+  const store = new ElectionStore();
+  const sourcePeriod = store.getActivePeriod();
+  const beforeSourceStats = store.getPeriodStats(sourcePeriod.id);
+
+  assert.ok(beforeSourceStats.votersCount > 0);
+  assert.ok(beforeSourceStats.candidatesCount > 0);
+  assert.ok(beforeSourceStats.votesCount > 0);
+  assert.ok(beforeSourceStats.unvotedCount > 0);
+  assert.ok(beforeSourceStats.committeeCount > 0);
+
+  // 1. Create new period carrying DPT & PIN, Pasangan Calon, and Panitia SK (fresh election votes = 0)
+  const freshPeriod = store.addPeriod(
+    {
+      schoolId: store.getSchool().id,
+      periodName: 'Pemilihan OSIS 2027/2028',
+      academicYear: '2027/2028',
+      startDate: '2027-09-10',
+      endDate: '2027-09-10',
+      votingOpenTime: '07:30',
+      votingCloseTime: '15:00',
+      status: 'active',
+      description: 'Periode baru',
+    },
+    {
+      copyFromPeriodId: sourcePeriod.id,
+      copyVoters: true,
+      copyCandidates: true,
+      copyCommittee: true,
+      copyVotes: false,
+    }
+  );
+
+  // Source period data MUST remain 100% intact
+  assert.deepEqual(store.getPeriodStats(sourcePeriod.id), beforeSourceStats);
+
+  // New period preserves all DPT & PIN, Pasangan Calon, Panitia SK, with everyone Belum Memilih
+  const freshStats = store.getPeriodStats(freshPeriod.id);
+  assert.equal(freshStats.votersCount, beforeSourceStats.votersCount);
+  assert.equal(freshStats.candidatesCount, beforeSourceStats.candidatesCount);
+  assert.equal(freshStats.committeeCount, beforeSourceStats.committeeCount);
+  assert.equal(freshStats.votesCount, 0);
+  assert.equal(freshStats.unvotedCount, beforeSourceStats.votersCount);
+  assert.ok(store.getVoters(freshPeriod.id).every((v) => Boolean(v.pinPlain)));
+
+  // 2. Create another period cloning ALL 5 datasets including Suara Masuk & Belum Memilih
+  const fullClonePeriod = store.addPeriod(
+    {
+      schoolId: store.getSchool().id,
+      periodName: 'Duplikasi Lengkap 2027/2028',
+      academicYear: '2027/2028',
+      startDate: '2027-09-11',
+      endDate: '2027-09-11',
+      votingOpenTime: '07:30',
+      votingCloseTime: '15:00',
+      status: 'draft',
+      description: 'Clone lengkap',
+    },
+    {
+      copyFromPeriodId: sourcePeriod.id,
+      copyVoters: true,
+      copyCandidates: true,
+      copyCommittee: true,
+      copyVotes: true,
+    }
+  );
+
+  const fullCloneStats = store.getPeriodStats(fullClonePeriod.id);
+  assert.deepEqual(fullCloneStats, beforeSourceStats);
+
+  // 3. Manually deleting fullClonePeriod only removes fullClonePeriod; sourcePeriod and freshPeriod stay permanent
+  const delRes = store.deletePeriod(fullClonePeriod.id);
+  assert.equal(delRes.success, true);
+  assert.equal(store.getPeriods().some((p) => p.id === fullClonePeriod.id), false);
+  assert.deepEqual(store.getPeriodStats(sourcePeriod.id), beforeSourceStats);
+  assert.equal(store.getPeriodStats(freshPeriod.id).votersCount, beforeSourceStats.votersCount);
+  assert.equal(store.getPeriodStats(freshPeriod.id).candidatesCount, beforeSourceStats.candidatesCount);
+  assert.equal(store.getPeriodStats(freshPeriod.id).committeeCount, beforeSourceStats.committeeCount);
+});
+

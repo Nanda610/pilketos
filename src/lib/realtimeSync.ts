@@ -49,16 +49,58 @@ export function computeOffsetForTargetAppTime(
   return Math.round(targetAppTimeMs - authoritativeServerNowMs);
 }
 
+export const DEFAULT_EPOCH_ID = 'epoch_epilketos_main';
+
+export function isResetEpochId(epochId?: string): boolean {
+  return typeof epochId === 'string' && epochId.startsWith('epoch_reset_');
+}
+
+export function isUninitializedDefaultSnapshot(
+  snapshot: Pick<ElectionStateSnapshot, 'revision'> & { lastAction?: string }
+): boolean {
+  return (
+    (snapshot.revision ?? 1) <= 1 &&
+    (!snapshot.lastAction ||
+      snapshot.lastAction === 'INIT_SYSTEM' ||
+      snapshot.lastAction === 'INIT' ||
+      snapshot.lastAction === 'LOAD_DISK')
+  );
+}
+
 /**
  * Determines whether an incoming remote state snapshot should overwrite local state.
- * Prevents stale echoes and infinite sync loops while guaranteeing all newer Admin changes apply immediately.
+ * Prevents stale echoes, fresh-server restarts, and older snapshots from wiping out created periods & election data,
+ * while ensuring viewers with stale caches or explicit demo resets accept the live authoritative election state.
  */
 export function shouldApplyRemoteSnapshot(
-  local: Pick<ElectionStateSnapshot, 'revision' | 'updatedAt'>,
-  remote: Pick<ElectionStateSnapshot, 'revision' | 'updatedAt'>,
+  local: Pick<ElectionStateSnapshot, 'revision' | 'updatedAt' | 'epochId'> & { lastAction?: string },
+  remote: Pick<ElectionStateSnapshot, 'revision' | 'updatedAt' | 'epochId'> & { lastAction?: string },
   forceSync: boolean = false
 ): boolean {
+  const localHasEdits =
+    (local.revision ?? 1) > 1 ||
+    (Boolean(local.lastAction) &&
+      local.lastAction !== 'INIT' &&
+      local.lastAction !== 'INIT_SYSTEM' &&
+      local.lastAction !== 'LOAD_DISK');
+
+  // Never allow a fresh/uninitialized server snapshot to wipe out local persisted periods or election data
+  if (localHasEdits && isUninitializedDefaultSnapshot(remote)) {
+    return false;
+  }
+
+  // Fresh unmodified client always accepts remote state
+  if (!localHasEdits) {
+    return true;
+  }
+
+  // Only an explicit RESET_DATA_DEMO epoch overrides local edited state unconditionally
+  if (isResetEpochId(remote.epochId) && remote.epochId !== local.epochId) {
+    return true;
+  }
+
   if (forceSync) return true;
+
   if (remote.revision > local.revision) return true;
   if (remote.revision < local.revision) return false;
 

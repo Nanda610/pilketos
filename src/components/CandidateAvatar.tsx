@@ -145,6 +145,7 @@ export const SchoolCrestLogo: React.FC<{
   logoUrl?: string;
   className?: string;
   aspectRatio?: '2x3' | '1x1';
+  shape?: 'default' | 'circle';
 }> = ({
   size = 48,
   width,
@@ -153,24 +154,35 @@ export const SchoolCrestLogo: React.FC<{
   logoUrl,
   className = '',
   aspectRatio = '2x3',
+  shape = 'default',
 }) => {
+  const isCircle = shape === 'circle';
+  const effectiveAspect = isCircle ? '1x1' : aspectRatio;
   const finalWidth = width || size;
-  const finalHeight = height || (aspectRatio === '2x3' ? Math.round(finalWidth * 1.5) : finalWidth);
+  const finalHeight = height || (effectiveAspect === '2x3' ? Math.round(finalWidth * 1.5) : finalWidth);
 
   if (logoUrl) {
     return (
       <div
-        className={`relative inline-flex items-center justify-center bg-transparent flex-shrink-0 ${className}`}
+        className={`relative inline-flex items-center justify-center flex-shrink-0 ${
+          isCircle ? 'rounded-full overflow-hidden bg-white/10 p-2.5' : 'bg-transparent'
+        } ${className}`}
         style={{ width: `${finalWidth}px`, height: `${finalHeight}px` }}
       >
-        <img src={logoUrl} alt="Logo Sekolah" className="w-full h-full object-contain filter drop-shadow-2xs" />
+        <img
+          src={logoUrl}
+          alt="Logo Sekolah"
+          className="w-full h-full object-contain object-center filter drop-shadow-2xs"
+        />
       </div>
     );
   }
 
   return (
     <div
-      className={`relative inline-flex items-center justify-center rounded-lg bg-slate-900 text-white shadow-sm flex-shrink-0 overflow-hidden ${className}`}
+      className={`relative inline-flex items-center justify-center ${
+        isCircle ? 'rounded-full' : 'rounded-lg'
+      } bg-slate-900 text-white shadow-sm flex-shrink-0 overflow-hidden ${className}`}
       style={{ width: `${finalWidth}px`, height: `${finalHeight}px` }}
     >
       <svg
@@ -197,7 +209,11 @@ export const SchoolCrestLogo: React.FC<{
           strokeLinejoin="round"
         />
       </svg>
-      <span className="absolute bottom-0.5 right-1 text-[7.5px] font-extrabold px-1 rounded bg-amber-500 text-slate-950 uppercase tracking-tighter">
+      <span
+        className={`absolute text-[7.5px] font-extrabold px-1 rounded bg-amber-500 text-slate-950 uppercase tracking-tighter ${
+          isCircle ? 'bottom-1 left-1/2 -translate-x-1/2' : 'bottom-0.5 right-1'
+        }`}
+      >
         {type}
       </span>
     </div>

@@ -20,11 +20,11 @@ test('generateRandomPin produces 6-character strings without confusing chars', (
   assert.equal(/[0O1IL]/.test(pin2), false);
 });
 
-test('validateNisn correctly checks 10-digit requirements', () => {
+test('validateNisn accepts flexible-length numeric NISN and rejects non-numeric or empty input', () => {
   assert.equal(validateNisn('0081234567').isValid, true);
   assert.equal(validateNisn('1234567890').isValid, true);
+  assert.equal(validateNisn('12345').isValid, true);
   // Invalid cases
-  assert.equal(validateNisn('12345').isValid, false);
   assert.equal(validateNisn('0081234567A').isValid, false);
   assert.equal(validateNisn('').isValid, false);
   assert.equal(validateNisn('          ').isValid, false);

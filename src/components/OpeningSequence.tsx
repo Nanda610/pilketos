@@ -35,12 +35,24 @@ export const OpeningSequence: React.FC<OpeningSequenceProps> = ({
   // Duration of procedural animation: 30 seconds
   const TOTAL_DURATION = 30;
   const [currentTime, setCurrentTime] = useState<number>(0);
+  const [videoDuration, setVideoDuration] = useState<number>(TOTAL_DURATION);
   const [isPlaying, setIsPlaying] = useState<boolean>(true);
   const [isMuted, setIsMuted] = useState<boolean>(false);
   const [soundActivated, setSoundActivated] = useState<boolean>(false);
   const [useCustomVideo, setUseCustomVideo] = useState<boolean>(Boolean(school.openingVideoUrl));
+  const [videoLoadError, setVideoLoadError] = useState<boolean>(false);
   const [isFullscreen, setIsFullscreen] = useState<boolean>(false);
   const [isFadingOut, setIsFadingOut] = useState<boolean>(false);
+
+  useEffect(() => {
+    const hasCustom = Boolean(school.openingVideoUrl && school.openingVideoUrl.trim() !== '');
+    setUseCustomVideo(hasCustom);
+    setVideoLoadError(false);
+    if (hasCustom) {
+      setCurrentTime(0);
+      setIsPlaying(true);
+    }
+  }, [school.openingVideoUrl]);
 
   const containerRef = useRef<HTMLDivElement>(null);
   const videoElemRef = useRef<HTMLVideoElement>(null);
@@ -156,13 +168,34 @@ export const OpeningSequence: React.FC<OpeningSequenceProps> = ({
     }, 450);
   };
 
+  // Toggle Play / Pause for both procedural motion graphic and HTML5 <video>
+  const handleTogglePlayPause = () => {
+    if (useCustomVideo && isDirectVideo && videoElemRef.current) {
+      if (videoElemRef.current.paused) {
+        videoElemRef.current.play().then(() => setIsPlaying(true)).catch(() => {});
+      } else {
+        videoElemRef.current.pause();
+        setIsPlaying(false);
+      }
+      return;
+    }
+    if (!isPlaying && currentTime >= TOTAL_DURATION) {
+      handleReplay();
+      return;
+    }
+    setIsPlaying((prev) => !prev);
+  };
+
   // Toggle Mute & Sound Activation
   const handleToggleSound = () => {
     const nextMuted = !isMuted;
     setIsMuted(nextMuted);
     cinematicAudio.setMuted(nextMuted);
     setSoundActivated(true);
-    if (!nextMuted) {
+    if (videoElemRef.current) {
+      videoElemRef.current.muted = nextMuted;
+    }
+    if (!nextMuted && !useCustomVideo) {
       cinematicAudio.playCountdownTick(true);
     }
   };
@@ -171,7 +204,14 @@ export const OpeningSequence: React.FC<OpeningSequenceProps> = ({
     setIsMuted(false);
     cinematicAudio.setMuted(false);
     setSoundActivated(true);
-    cinematicAudio.playCountdownTick(true);
+    if (videoElemRef.current) {
+      videoElemRef.current.muted = false;
+      if (videoElemRef.current.paused) {
+        videoElemRef.current.play().catch(() => {});
+      }
+    } else {
+      cinematicAudio.playCountdownTick(true);
+    }
   };
 
   const handleReplay = () => {
@@ -195,26 +235,60 @@ export const OpeningSequence: React.FC<OpeningSequenceProps> = ({
     }
   };
 
-  // YouTube embed helper if school video is YouTube
+  // YouTube embed helper if school video is YouTube (supports watch, youtu.be, embed, shorts, live)
   const getYouTubeEmbed = (url: string) => {
     if (!url) return null;
-    const match = url.match(/^.*(youtu.be\/|v\/|u\/\w\/|embed\/|watch\?v=|\&v=)([^#\&\?]*).*/);
-    if (match && match[2].length === 11) {
-      return `https://www.youtube.com/embed/${match[2]}?autoplay=1&rel=0`;
+    const match = url.match(
+      /^.*(?:youtu\.be\/|youtube\.com\/(?:embed\/|shorts\/|live\/|v\/|watch\?v=|watch\?.+&v=))([a-zA-Z0-9_-]{11}).*/
+    );
+    if (match && match[1]) {
+      return `https://www.youtube.com/embed/${match[1]}?autoplay=1&mute=1&rel=0&playsinline=1`;
     }
     return null;
   };
 
   const customYtEmbed = school.openingVideoUrl ? getYouTubeEmbed(school.openingVideoUrl) : null;
-  const isDirectVideo = school.openingVideoUrl && !customYtEmbed;
+  const isDirectVideo = Boolean(school.openingVideoUrl && !customYtEmbed);
 
-  // Countdown calculations
+  // Attempt unmuted autoplay first; if blocked by browser autoplay policy, fall back cleanly to muted autoplay
+  useEffect(() => {
+    if (!useCustomVideo || !isDirectVideo || !videoElemRef.current) return;
+    const videoEl = videoElemRef.current;
+    videoEl.muted = isMuted;
+    const playPromise = videoEl.play();
+    if (playPromise && typeof playPromise.catch === 'function') {
+      playPromise.catch(() => {
+        videoEl.muted = true;
+        setIsMuted(true);
+        videoEl.play().catch(() => {
+          setIsPlaying(false);
+        });
+      });
+    }
+  }, [useCustomVideo, isDirectVideo, school.openingVideoUrl]);
+
+  // Countdown calculations & progress bar
+  const activeTotalDuration = useCustomVideo && isDirectVideo && videoDuration > 0 ? videoDuration : TOTAL_DURATION;
   const countdownNumber = Math.max(1, 5 - Math.floor(currentTime));
-  const progressPercent = Math.min(100, (currentTime / TOTAL_DURATION) * 100);
+  const progressPercent = Math.min(100, (currentTime / Math.max(1, activeTotalDuration)) * 100);
+
+  const handleSeekBarClick = (e: React.MouseEvent<HTMLDivElement>) => {
+    const rect = e.currentTarget.getBoundingClientRect();
+    const ratio = Math.max(0, Math.min(1, (e.clientX - rect.left) / Math.max(1, rect.width)));
+    const nextSec = ratio * activeTotalDuration;
+    setCurrentTime(nextSec);
+    if (useCustomVideo && isDirectVideo && videoElemRef.current) {
+      videoElemRef.current.currentTime = nextSec;
+    } else {
+      const nextStage = getStage(nextSec);
+      audioLastStageRef.current = nextStage === 0 ? -1 : nextStage + 1;
+    }
+  };
 
   return (
     <div 
       ref={containerRef}
+      data-testid="opening-sequence-overlay"
       className={`fixed inset-0 z-50 bg-slate-950 flex flex-col items-center justify-center select-none overflow-hidden transition-opacity duration-500 ${
         isFadingOut ? 'opacity-0 scale-102 pointer-events-none' : 'opacity-100 scale-100'
       }`}
@@ -254,13 +328,14 @@ export const OpeningSequence: React.FC<OpeningSequenceProps> = ({
 
         {/* Right: Sound Notice & Quick Skip Button */}
         <div className="flex items-center gap-3">
-          {!soundActivated && !isMuted && !useCustomVideo && (
+          {((!soundActivated && !useCustomVideo) || (useCustomVideo && isDirectVideo && isMuted)) && (
             <button
+              type="button"
               onClick={handleActivateSound}
               className="px-3 py-1.5 rounded-lg bg-amber-500/20 hover:bg-amber-500/30 border border-amber-500/40 text-amber-200 text-xs font-medium flex items-center gap-1.5 transition-all cursor-pointer animate-bounce"
             >
               <Volume2 className="w-3.5 h-3.5" />
-              <span>Nyalakan Suara Intro</span>
+              <span>{useCustomVideo ? 'Aktifkan Suara Video' : 'Nyalakan Suara Intro'}</span>
             </button>
           )}
 
@@ -290,13 +365,31 @@ export const OpeningSequence: React.FC<OpeningSequenceProps> = ({
                   allowFullScreen
                   title={school.openingVideoTitle || 'Video Pembukaan Resmi'}
                 />
-              ) : isDirectVideo ? (
+              ) : isDirectVideo && !videoLoadError ? (
                 <video
                   ref={videoElemRef}
                   src={school.openingVideoUrl}
                   autoPlay
+                  muted={isMuted}
                   controls
                   playsInline
+                  onLoadedMetadata={(e) => {
+                    const dur = e.currentTarget.duration;
+                    if (Number.isFinite(dur) && dur > 0) {
+                      setVideoDuration(dur);
+                    }
+                  }}
+                  onTimeUpdate={(e) => {
+                    setCurrentTime(e.currentTarget.currentTime);
+                  }}
+                  onPlay={() => setIsPlaying(true)}
+                  onPause={() => setIsPlaying(false)}
+                  onError={() => {
+                    setVideoLoadError(true);
+                    setUseCustomVideo(false);
+                    setCurrentTime(0);
+                    setIsPlaying(true);
+                  }}
                   onEnded={() => {
                     setUseCustomVideo(false);
                     setCurrentTime(TOTAL_DURATION);
@@ -306,10 +399,15 @@ export const OpeningSequence: React.FC<OpeningSequenceProps> = ({
                 />
               ) : (
                 <div className="text-center p-8 space-y-3">
-                  <p className="text-sm text-slate-300">Format video khusus tidak didukung secara langsung.</p>
+                  <p className="text-sm text-slate-300">Format video khusus tidak dapat dimuat secara langsung.</p>
                   <button 
-                    onClick={() => setUseCustomVideo(false)}
-                    className="px-4 py-2 bg-sky-600 text-white rounded-lg text-xs font-bold"
+                    type="button"
+                    onClick={() => {
+                      setUseCustomVideo(false);
+                      setCurrentTime(0);
+                      setIsPlaying(true);
+                    }}
+                    className="px-4 py-2 bg-sky-600 text-white rounded-lg text-xs font-bold cursor-pointer"
                   >
                     Beralih ke Motion Graphic Intro
                   </button>
@@ -522,7 +620,15 @@ export const OpeningSequence: React.FC<OpeningSequenceProps> = ({
       {/* Bottom Floating Control Bar */}
       <div className="relative z-20 w-full max-w-5xl px-6 py-4 flex flex-col gap-2.5">
         {/* Seekable Progress Bar */}
-        <div className="relative w-full h-2 rounded-full bg-slate-800 overflow-hidden cursor-pointer">
+        <div
+          onClick={handleSeekBarClick}
+          role="progressbar"
+          aria-valuenow={Math.round(progressPercent)}
+          aria-valuemin={0}
+          aria-valuemax={100}
+          className="relative w-full h-2 rounded-full bg-slate-800 overflow-hidden cursor-pointer"
+          title="Klik untuk melompat ke detik tertentu"
+        >
           <div 
             className="h-full bg-gradient-to-r from-sky-500 via-amber-400 to-emerald-400 transition-all duration-100"
             style={{ width: `${progressPercent}%` }}
@@ -534,22 +640,27 @@ export const OpeningSequence: React.FC<OpeningSequenceProps> = ({
           {/* Left Controls: Play/Pause, Replay, Sound */}
           <div className="flex items-center gap-3">
             <button
-              onClick={() => setIsPlaying(!isPlaying)}
+              type="button"
+              onClick={handleTogglePlayPause}
               className="p-2 rounded-lg bg-slate-900 hover:bg-slate-800 text-white transition-colors cursor-pointer"
               title={isPlaying ? 'Jeda' : 'Putar'}
+              aria-label={isPlaying ? 'Jeda Video' : 'Putar Video'}
             >
               {isPlaying ? <Pause className="w-4 h-4" /> : <Play className="w-4 h-4 text-emerald-400" />}
             </button>
 
             <button
+              type="button"
               onClick={handleReplay}
               className="p-2 rounded-lg bg-slate-900 hover:bg-slate-800 text-slate-300 hover:text-white transition-colors cursor-pointer"
               title="Putar Ulang dari Awal"
+              aria-label="Putar Ulang dari Awal"
             >
               <RotateCcw className="w-4 h-4" />
             </button>
 
             <button
+              type="button"
               onClick={handleToggleSound}
               className={`p-2 rounded-lg transition-colors cursor-pointer flex items-center gap-1.5 ${
                 isMuted 
@@ -557,6 +668,7 @@ export const OpeningSequence: React.FC<OpeningSequenceProps> = ({
                   : 'bg-slate-900 hover:bg-slate-800 text-sky-400'
               }`}
               title={isMuted ? 'Nyalakan Suara' : 'Matikan Suara'}
+              aria-label={isMuted ? 'Nyalakan Suara' : 'Matikan Suara'}
             >
               {isMuted ? <VolumeX className="w-4 h-4" /> : <Volume2 className="w-4 h-4" />}
               <span className="hidden sm:inline font-mono text-[11px]">
@@ -566,7 +678,7 @@ export const OpeningSequence: React.FC<OpeningSequenceProps> = ({
 
             {/* Time Stamp */}
             <span className="font-mono text-slate-400 ml-1">
-              00:{String(Math.floor(currentTime)).padStart(2, '0')} / 00:{TOTAL_DURATION}
+              {String(Math.floor(currentTime / 60)).padStart(2, '0')}:{String(Math.floor(currentTime % 60)).padStart(2, '0')} / {String(Math.floor(activeTotalDuration / 60)).padStart(2, '0')}:{String(Math.floor(activeTotalDuration % 60)).padStart(2, '0')}
             </span>
           </div>
 

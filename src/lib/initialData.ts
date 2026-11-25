@@ -24,6 +24,7 @@ export const INITIAL_SCHOOL: SchoolConfig = {
   email: 'info@smpyaspai.sch.id',
   logoUrl: '',
   osisLogoUrl: '',
+  openingVideoEnabled: true,
 };
 
 export const INITIAL_PERIODS: ElectionPeriod[] = [

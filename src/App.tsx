@@ -20,6 +20,9 @@ import { ShareBloggerModal } from './components/ShareBloggerModal';
 import { AuthSession, UserRole } from './types';
 import { Lock, ShieldAlert, ArrowLeft, KeyRound } from 'lucide-react';
 
+const SESSION_ACTIVE_VIEW_KEY = 'epilketos_active_view';
+const SESSION_INTRO_SEEN_KEY = 'epilketos_intro_seen';
+
 export default function App() {
   const [currentView, setCurrentView] = useState<AppView>(() => {
     if (typeof window !== 'undefined') {
@@ -34,6 +37,19 @@ export default function App() {
       ) {
         return requestedView as AppView;
       }
+      try {
+        const savedView = sessionStorage.getItem(SESSION_ACTIVE_VIEW_KEY) as AppView | null;
+        const session = electionStore.getActiveSession();
+        if (savedView === 'PUBLIC' || savedView === 'BOOTH' || savedView === 'PRD') {
+          return savedView;
+        }
+        if (savedView === 'PANITIA' && session) {
+          return 'PANITIA';
+        }
+        if (savedView === 'ADMIN' && session?.role === 'admin') {
+          return 'ADMIN';
+        }
+      } catch {}
     }
     return 'PUBLIC';
   });
@@ -46,16 +62,47 @@ export default function App() {
   // Share to Blogger modal state
   const [shareBloggerOpen, setShareBloggerOpen] = useState<boolean>(false);
 
-  // Opening video plays before entering the application (skippable via ?autostart=1)
+  // Opening video plays automatically before entering the app when enabled (skippable via ?live=1, ?autostart=1, ?skipIntro=1, direct portal links, or already seen in session)
+  const [manualOpeningReplay, setManualOpeningReplay] = useState<boolean>(false);
   const [showOpeningVideo, setShowOpeningVideo] = useState<boolean>(() => {
     if (typeof window !== 'undefined') {
       const params = new URLSearchParams(window.location.search);
-      if (params.get('autostart') === '1' || params.get('skipIntro') === '1') {
+      const viewParam = params.get('view')?.toUpperCase();
+      if (
+        params.get('live') === '1' ||
+        params.get('autostart') === '1' ||
+        params.get('skipIntro') === '1' ||
+        viewParam === 'BOOTH' ||
+        viewParam === 'PANITIA' ||
+        viewParam === 'ADMIN'
+      ) {
         return false;
       }
+      if (electionStore.getSchool().openingVideoEnabled === false) {
+        return false;
+      }
+      try {
+        if (sessionStorage.getItem(SESSION_INTRO_SEEN_KEY) === '1') {
+          return false;
+        }
+      } catch {}
     }
     return true;
   });
+
+  const handleTriggerOpeningVideo = () => {
+    setManualOpeningReplay(true);
+    setShowOpeningVideo(true);
+  };
+
+  // Persist currentView in sessionStorage across accidental refreshes
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      try {
+        sessionStorage.setItem(SESSION_ACTIVE_VIEW_KEY, currentView);
+      } catch {}
+    }
+  }, [currentView]);
 
   // Reactive state synced with electionStore (and authoritative real-time server)
   const [school, setSchool] = useState<SchoolConfig>(() => electionStore.getSchool());
@@ -84,7 +131,11 @@ export default function App() {
   useEffect(() => {
     // Subscribe to real-time store updates (local & remote WebSocket/BroadcastChannel/HTTP)
     const unsubscribe = electionStore.subscribe(() => {
-      setSchool(electionStore.getSchool());
+      const nextSchool = electionStore.getSchool();
+      setSchool(nextSchool);
+      if (nextSchool.openingVideoEnabled === false) {
+        setShowOpeningVideo((prev) => (manualOpeningReplay ? prev : false));
+      }
       setPeriods(electionStore.getPeriods());
       const currentActive = electionStore.getActivePeriod();
       setActivePeriod(currentActive);
@@ -174,7 +225,13 @@ export default function App() {
           school={school}
           period={activePeriod}
           candidates={electionStore.getCandidates(activePeriod.id)}
-          onComplete={() => setShowOpeningVideo(false)}
+          onComplete={() => {
+            try {
+              sessionStorage.setItem(SESSION_INTRO_SEEN_KEY, '1');
+            } catch {}
+            setManualOpeningReplay(false);
+            setShowOpeningVideo(false);
+          }}
         />
       )}
 
@@ -192,6 +249,7 @@ export default function App() {
         }}
         onLogout={handleLogout}
         onOpenShareBlogger={() => setShareBloggerOpen(true)}
+        onOpenOpeningVideo={handleTriggerOpeningVideo}
       />
 
       {/* Authentication Login Modal */}
@@ -212,7 +270,7 @@ export default function App() {
       />
 
       {/* Main Content Area */}
-      <main className="relative z-10 flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 py-6 md:py-8 print:p-0 print:m-0 print:max-w-none">
+      <main className="relative flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 py-6 md:py-8 print:p-0 print:m-0 print:max-w-none">
         {currentView === 'PUBLIC' && (
           <QuickCountDashboard
             school={school}
@@ -221,6 +279,7 @@ export default function App() {
             syncMeta={syncMeta}
             onNavigateToBooth={() => setCurrentView('BOOTH')}
             onOpenShareBlogger={() => setShareBloggerOpen(true)}
+            onOpenOpeningVideo={handleTriggerOpeningVideo}
           />
         )}
 
@@ -325,7 +384,7 @@ export default function App() {
       </main>
 
       {/* Footer conforming to design constitution: Quiet copyright and institutional info with glass effect */}
-      <footer className="no-print relative z-10 border-t border-white/60 glass-panel py-6 text-center text-xs text-slate-500 mt-auto">
+      <footer className="no-print relative z-0 border-t border-white/60 glass-panel py-6 text-center text-xs text-slate-500 mt-auto">
         <div className="max-w-7xl mx-auto px-4 space-y-2">
           <p className="font-semibold text-slate-700">
             {school.type} {school.name} · Sistem Pemilihan Suara Elektronik (E-Pilketos Digital)
@@ -339,7 +398,7 @@ export default function App() {
             <span>·</span>
             <button
               type="button"
-              onClick={() => setShowOpeningVideo(true)}
+              onClick={handleTriggerOpeningVideo}
               className="text-rose-600 hover:text-rose-700 font-semibold underline underline-offset-2 cursor-pointer transition-colors"
             >
               🎬 Putar Video Pembukaan
